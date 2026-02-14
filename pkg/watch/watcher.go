@@ -90,6 +90,9 @@ func (w *Watcher) scan() map[string]time.Time {
 			if strings.HasPrefix(name, ".") || name == "node_modules" || name == "vendor" {
 				return filepath.SkipDir
 			}
+			if matchesAny(name, w.ignorePatterns) {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		relPath, _ := filepath.Rel(w.dir, path)

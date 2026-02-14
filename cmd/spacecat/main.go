@@ -13,17 +13,19 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
-	embeddedpostgres "github.com/fergusstrange/embedded-postgres"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
+	"github.com/lmittmann/tint"
 
 	"github.com/housecat-inc/spacecat/pkg/api"
+	"github.com/housecat-inc/spacecat/pkg/postgres"
 )
 
 const (
@@ -34,26 +36,26 @@ const (
 )
 
 func main() {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger := slog.New(tint.NewHandler(os.Stderr, &tint.Options{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
 
 	reg := newRegistry(logger)
 
-	// Start embedded postgres
-	pg := embeddedpostgres.NewDatabase(
-		embeddedpostgres.DefaultConfig().
-			Port(postgresPort).
-			Logger(os.Stderr),
-	)
-	if err := pg.Start(); err != nil {
-		logger.Error("failed to start embedded postgres", "error", err)
+	// Ensure postgres is running (shared daemon, not stopped on shutdown)
+	pgURL, err := postgres.EnsureRunning()
+	if err != nil {
+		logger.Error("failed to ensure postgres", "error", err)
 		os.Exit(1)
 	}
 	reg.mu.Lock()
 	reg.postgresRunning = true
-	reg.postgresURL = fmt.Sprintf("postgres://localhost:%d/postgres?sslmode=disable", postgresPort)
+	reg.postgresURL = pgURL
 	reg.mu.Unlock()
-	logger.Info("embedded postgres started", "port", postgresPort)
+
+	// Load persisted state if available
+	stateFile := filepath.Join(".spacecat", "state.json")
+	os.MkdirAll(".spacecat", 0o755)
+	reg.loadState(stateFile)
 
 	// Start Echo
 	e := echo.New()
@@ -97,9 +99,12 @@ func main() {
 	e.Any("/*", reg.handleProxy)
 	e.Any("/", reg.handleProxy)
 
+	// Periodic state save
+	go reg.periodicSave(stateFile, 5*time.Second)
+
 	go func() {
 		addr := fmt.Sprintf(":%d", dashboardPort)
-		logger.Info("starting spacecat", "addr", addr)
+		logger.Info("starting spacecat", "url", fmt.Sprintf("http://localhost:%d", dashboardPort))
 		if err := e.Start(addr); err != nil && err != http.ErrServerClosed {
 			logger.Error("server error", "error", err)
 		}
@@ -117,9 +122,7 @@ func main() {
 	if err := e.Shutdown(ctx); err != nil {
 		logger.Error("server shutdown error", "error", err)
 	}
-	if err := pg.Stop(); err != nil {
-		logger.Error("postgres shutdown error", "error", err)
-	}
+	reg.saveState(stateFile)
 	logger.Info("shutdown complete")
 }
 
@@ -182,12 +185,13 @@ func (r *registry) unsubscribe(ch chan []byte) {
 	close(ch)
 }
 
-func (r *registry) register(req api.RegisterRequest) (*api.App, error) {
+// register returns the app and whether it already existed.
+func (r *registry) register(req api.RegisterRequest) (*api.App, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if _, exists := r.apps[req.Space]; exists {
-		return nil, fmt.Errorf("space %q already registered", req.Space)
+	if existing, exists := r.apps[req.Space]; exists {
+		return existing, true
 	}
 
 	blue := r.nextBluePort
@@ -211,7 +215,7 @@ func (r *registry) register(req api.RegisterRequest) (*api.App, error) {
 	}
 	r.apps[req.Space] = app
 	r.lastRegistered = req.Space
-	return app, nil
+	return app, false
 }
 
 func (r *registry) get(space string) (*api.App, bool) {
@@ -355,15 +359,17 @@ func (r *registry) handleRegisterApp(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "space is required"})
 	}
 
-	app, err := r.register(req)
-	if err != nil {
-		return c.JSON(http.StatusConflict, map[string]string{"error": err.Error()})
-	}
+	app, existed := r.register(req)
 
-	r.logger.Info("app registered", "space", app.Space)
+	r.logger.Info("app registered", "space", app.Space, "existed", existed)
 	r.broadcast("app", app)
 
-	return c.JSON(http.StatusCreated, api.RegisterResponse{
+	status := http.StatusCreated
+	if existed {
+		status = http.StatusOK
+	}
+
+	return c.JSON(status, api.RegisterResponse{
 		Space:         app.Space,
 		BluePort:      app.BluePort,
 		GreenPort:     app.GreenPort,
@@ -753,4 +759,71 @@ func (r *registry) handleDashboard(c echo.Context) error {
 		Apps:   r.list(),
 	}
 	return dashboardTmpl.Execute(c.Response().Writer, data)
+}
+
+// State persistence
+
+type registryState struct {
+	Apps           map[string]*api.App `json:"apps"`
+	NextBluePort   int                 `json:"next_blue_port"`
+	LastRegistered string              `json:"last_registered"`
+}
+
+func (r *registry) saveState(path string) {
+	r.mu.RLock()
+	state := registryState{
+		Apps:           r.apps,
+		NextBluePort:   r.nextBluePort,
+		LastRegistered: r.lastRegistered,
+	}
+	r.mu.RUnlock()
+
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		r.logger.Warn("failed to marshal state", "error", err)
+		return
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		r.logger.Warn("failed to write state", "error", err)
+		return
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		r.logger.Warn("failed to rename state file", "error", err)
+	}
+}
+
+func (r *registry) loadState(path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return // no state file, start fresh
+	}
+	var state registryState
+	if err := json.Unmarshal(data, &state); err != nil {
+		r.logger.Warn("failed to parse state file, starting fresh", "error", err)
+		return
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.apps = state.Apps
+	r.nextBluePort = state.NextBluePort
+	r.lastRegistered = state.LastRegistered
+
+	if r.apps == nil {
+		r.apps = make(map[string]*api.App)
+	}
+	for _, app := range r.apps {
+		app.HealthStatus = "unknown"
+	}
+
+	r.logger.Info("loaded state", "apps", len(r.apps), "next_blue_port", r.nextBluePort)
+}
+
+func (r *registry) periodicSave(path string, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for range ticker.C {
+		r.saveState(path)
+	}
 }

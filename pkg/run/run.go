@@ -309,7 +309,7 @@ func register(spacecatURL string, req api.RegisterRequest) (*api.RegisterRespons
 		return nil, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusCreated {
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("register failed: %s", resp.Status)
 	}
 	var result api.RegisterResponse
