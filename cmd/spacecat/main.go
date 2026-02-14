@@ -273,6 +273,34 @@ func (r *registry) activeTarget() (space string, port int, ok bool) {
 	return app.Space, app.BluePort, true
 }
 
+// extractSubdomain pulls the subdomain from a Host header like "greet.localhost:8080".
+func extractSubdomain(host string) string {
+	if idx := strings.Index(host, ":"); idx != -1 {
+		host = host[:idx]
+	}
+	parts := strings.Split(host, ".")
+	if len(parts) >= 2 && parts[len(parts)-1] == "localhost" {
+		return parts[0]
+	}
+	return ""
+}
+
+// targetForRequest resolves routing: subdomain match first, then lastRegistered.
+func (r *registry) targetForRequest(host string) (space string, port int, ok bool) {
+	if sub := extractSubdomain(host); sub != "" {
+		r.mu.RLock()
+		app, exists := r.apps[sub]
+		r.mu.RUnlock()
+		if exists {
+			if app.ActiveColor == "green" {
+				return app.Space, app.GreenPort, true
+			}
+			return app.Space, app.BluePort, true
+		}
+	}
+	return r.activeTarget()
+}
+
 func (r *registry) status() api.Status {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -438,7 +466,7 @@ func (r *registry) handleSSE(c echo.Context) error {
 // Reverse proxy handler
 
 func (r *registry) handleProxy(c echo.Context) error {
-	space, port, ok := r.activeTarget()
+	space, port, ok := r.targetForRequest(c.Request().Host)
 	if !ok {
 		return c.Redirect(http.StatusTemporaryRedirect, "/_spaces/")
 	}
@@ -490,9 +518,9 @@ const spacesJS = `(function() {
   el.innerHTML = '<span class="__sc-dot"></span> <span class="__sc-label"></span>';
   document.body.appendChild(el);
 
-  const tip = document.createElement("div");
-  tip.id = "__spacecat-tip";
-  document.body.appendChild(tip);
+  const menu = document.createElement("div");
+  menu.id = "__spacecat-menu";
+  document.body.appendChild(menu);
 
   const style = document.createElement("style");
   style.textContent = ` + "`" + `
@@ -513,15 +541,22 @@ const spacesJS = `(function() {
     .__sc-dot.unhealthy { background: #ef4444; }
     .__sc-dot.unknown { background: #888; }
     .__sc-dot.building { background: #facc15; }
-    #__spacecat-tip {
+    #__spacecat-menu {
       position: fixed; bottom: 44px; right: 12px; z-index: 2147483647;
       background: #1a1a2e; color: #e0e0e0; border: 1px solid #2a2a3e;
-      border-radius: 8px; padding: 10px 14px; font: 11px/1.6 monospace;
+      border-radius: 8px; padding: 4px 0; font: 12px/1 system-ui, sans-serif;
       box-shadow: 0 2px 12px rgba(0,0,0,0.5);
-      display: none; white-space: pre;
+      display: none; min-width: 180px;
     }
-    #__spacecat:hover + #__spacecat-tip,
-    #__spacecat-tip:hover { display: block; }
+    #__spacecat-menu.open { display: block; }
+    .__sc-item {
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 14px; cursor: pointer; text-decoration: none; color: #e0e0e0;
+    }
+    .__sc-item:hover { background: #2a2a3e; }
+    .__sc-item.active { background: #2a2a3e; font-weight: 600; }
+    .__sc-item .info { color: #888; font-size: 11px; margin-left: auto; }
+    .__sc-sep { border-top: 1px solid #2a2a3e; margin: 4px 0; }
   ` + "`" + `;
   document.head.appendChild(style);
 
@@ -529,27 +564,54 @@ const spacesJS = `(function() {
   const label = el.querySelector(".__sc-label");
   label.textContent = space + " :" + initialPort;
 
-  el.addEventListener("click", function() {
-    window.open("/_spaces/", "_blank");
+  let allApps = {};
+  let menuOpen = false;
+
+  el.addEventListener("click", function(e) {
+    e.stopPropagation();
+    menuOpen = !menuOpen;
+    renderMenu();
   });
+
+  document.addEventListener("click", function() {
+    if (menuOpen) { menuOpen = false; renderMenu(); }
+  });
+
+  menu.addEventListener("click", function(e) { e.stopPropagation(); });
+
+  function renderMenu() {
+    if (!menuOpen) { menu.className = ""; menu.id = "__spacecat-menu"; return; }
+    menu.className = "open"; menu.id = "__spacecat-menu";
+    const list = Object.values(allApps);
+    let h = "";
+    for (const a of list) {
+      const p = a.active_color === "green" ? a.green_port : a.blue_port;
+      const active = a.space === space ? " active" : "";
+      const href = location.protocol + "//" + a.space + ".localhost:" + location.port + "/";
+      h += '<a class="__sc-item' + active + '" href="' + href + '">' +
+        '<span class="__sc-dot ' + a.health_status + '"></span>' +
+        a.space +
+        '<span class="info">:' + p + '</span></a>';
+    }
+    h += '<div class="__sc-sep"></div>';
+    h += '<a class="__sc-item" href="/_spaces/" target="_blank">Dashboard</a>';
+    menu.innerHTML = h;
+  }
 
   let lastPort = initialPort;
   let reloading = false;
 
   function update(app) {
-    if (!app || app.space !== space) return;
+    if (!app) return;
+    allApps[app.space] = app;
+    if (menuOpen) renderMenu();
+
+    if (app.space !== space) return;
 
     dot.className = "__sc-dot " + app.health_status;
     const p = app.active_color === "green" ? app.green_port : app.blue_port;
     label.textContent = app.space + " :" + p;
 
-    tip.textContent =
-      "DIR                   = " + (app.dir || "") + "\n" +
-      "SPACE                 = " + app.space + "\n" +
-      "PORT                  = " + p + "\n" +
-      "DATABASE_TEMPLATE_URL = " + (app.template_db_url || "");
-
-    // Auto-reload when proxy switches to a new healthy port
     if (String(p) !== lastPort && app.health_status === "healthy" && !reloading) {
       reloading = true;
       label.textContent = "reloading...";
@@ -562,7 +624,9 @@ const spacesJS = `(function() {
 
   es.addEventListener("init", function(e) {
     const apps = JSON.parse(e.data);
-    const app = apps.find(a => a.space === space);
+    allApps = {};
+    for (const a of apps) allApps[a.space] = a;
+    const app = allApps[space];
     if (app) update(app);
   });
 
@@ -572,6 +636,8 @@ const spacesJS = `(function() {
 
   es.addEventListener("deregister", function(e) {
     const data = JSON.parse(e.data);
+    delete allApps[data.space];
+    if (menuOpen) renderMenu();
     if (data.space === space) {
       dot.className = "__sc-dot unhealthy";
       label.textContent = space + " disconnected";
@@ -610,6 +676,8 @@ var dashboardTmpl = template.Must(template.New("dashboard").Parse(`<!DOCTYPE htm
   .healthy { color: #4ade80; }
   .unhealthy { color: #ef4444; }
   .unknown { color: #888; }
+  a { color: #7dd3fc; text-decoration: none; }
+  a:hover { text-decoration: underline; }
   code { background: #1a1a2e; padding: 2px 6px; border-radius: 4px; font-size: 0.85rem; }
   .empty { text-align: center; padding: 3rem; color: #666; }
 </style>
@@ -636,15 +704,14 @@ var dashboardTmpl = template.Must(template.New("dashboard").Parse(`<!DOCTYPE htm
     }
     let h = '<table><thead><tr>' +
       '<th>Space</th><th>Config</th><th>Template DB</th>' +
-      '<th>Proxy</th><th>Blue</th><th>Green</th><th>Active</th>' +
+      '<th>Blue</th><th>Green</th><th>Active</th>' +
       '<th>Health</th><th>Watch</th><th>Logs</th></tr></thead><tbody>';
     for (const a of list) {
       const watch = (a.watch_patterns || []).map(p => '<code>' + p + '</code>').join(' ');
       h += '<tr>' +
-        '<td><strong>' + a.space + '</strong></td>' +
+        '<td><strong><a href="' + location.protocol + '//' + a.space + '.localhost:' + location.port + '/">' + a.space + '</a></strong></td>' +
         '<td><code>' + (a.config_file || '') + '</code></td>' +
         '<td><code>' + (a.template_db_url || '') + '</code></td>' +
-        '<td>:' + a.proxy_port + '</td>' +
         '<td>:' + a.blue_port + '</td>' +
         '<td>:' + a.green_port + '</td>' +
         '<td>' + a.active_color + '</td>' +
