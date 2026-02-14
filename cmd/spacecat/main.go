@@ -191,6 +191,7 @@ func (r *registry) register(req api.RegisterRequest) (*api.App, bool) {
 	defer r.mu.Unlock()
 
 	if existing, exists := r.apps[req.Space]; exists {
+		r.lastRegistered = req.Space
 		return existing, true
 	}
 
@@ -808,7 +809,9 @@ func (r *registry) loadState(path string) {
 	defer r.mu.Unlock()
 	r.apps = state.Apps
 	r.nextBluePort = state.NextBluePort
-	r.lastRegistered = state.LastRegistered
+	// Don't restore lastRegistered — no apps are running yet, so the
+	// proxy should show the dashboard until an app actually registers.
+	r.lastRegistered = ""
 
 	if r.apps == nil {
 		r.apps = make(map[string]*api.App)
