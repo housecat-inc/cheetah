@@ -9,9 +9,8 @@ import (
 
 func main() {
 	port := os.Getenv("PORT")
-	space := os.Getenv("SPACE")
 
-	slog.Info("greet app starting", "port", port, "space", space)
+	slog.Info("greet app starting", "port", port)
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		name := r.URL.Query().Get("name")
@@ -22,9 +21,8 @@ func main() {
 		fmt.Fprintf(w, `<!DOCTYPE html>
 <html><head><title>Greet</title></head>
 <body>
-<h1>Hello, %s!</h1>
-<p>space: %s &middot; port: %s</p>
-</body></html>`, name, space, port)
+<h1>Hello, %s</h1>
+</body></html>`, name)
 	})
 
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {

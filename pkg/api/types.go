@@ -4,6 +4,7 @@ import "time"
 
 type App struct {
 	Space           string     `json:"space"`
+	Dir             string     `json:"dir"`
 	ConfigFile      string     `json:"config_file"`
 	TemplateDBURL   string     `json:"template_db_url"`
 	DatabaseURL     string     `json:"database_url"`
@@ -35,6 +36,7 @@ type Status struct {
 
 type RegisterRequest struct {
 	Space          string   `json:"space"`
+	Dir            string   `json:"dir"`
 	ConfigFile     string   `json:"config_file"`
 	WatchPatterns  []string `json:"watch_patterns"`
 	IgnorePatterns []string `json:"ignore_patterns"`

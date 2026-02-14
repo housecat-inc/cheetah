@@ -201,6 +201,7 @@ func (r *registry) register(req api.RegisterRequest) (*api.App, error) {
 
 	app := &api.App{
 		Space:          req.Space,
+		Dir:            req.Dir,
 		ConfigFile:     req.ConfigFile,
 		TemplateDBURL:  fmt.Sprintf("postgres://localhost:%d/t_%s?sslmode=disable", postgresPort, req.Space),
 		DatabaseURL:    fmt.Sprintf("postgres://localhost:%d/%s?sslmode=disable", postgresPort, req.Space),
@@ -489,6 +490,10 @@ const spacesJS = `(function() {
   el.innerHTML = '<span class="__sc-dot"></span> <span class="__sc-label"></span>';
   document.body.appendChild(el);
 
+  const tip = document.createElement("div");
+  tip.id = "__spacecat-tip";
+  document.body.appendChild(tip);
+
   const style = document.createElement("style");
   style.textContent = ` + "`" + `
     #__spacecat {
@@ -508,6 +513,15 @@ const spacesJS = `(function() {
     .__sc-dot.unhealthy { background: #ef4444; }
     .__sc-dot.unknown { background: #888; }
     .__sc-dot.building { background: #facc15; }
+    #__spacecat-tip {
+      position: fixed; bottom: 44px; right: 12px; z-index: 2147483647;
+      background: #1a1a2e; color: #e0e0e0; border: 1px solid #2a2a3e;
+      border-radius: 8px; padding: 10px 14px; font: 11px/1.6 monospace;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.5);
+      display: none; white-space: pre;
+    }
+    #__spacecat:hover + #__spacecat-tip,
+    #__spacecat-tip:hover { display: block; }
   ` + "`" + `;
   document.head.appendChild(style);
 
@@ -528,6 +542,12 @@ const spacesJS = `(function() {
     dot.className = "__sc-dot " + app.health_status;
     const p = app.active_color === "green" ? app.green_port : app.blue_port;
     label.textContent = app.space + " :" + p;
+
+    tip.textContent =
+      "DIR                   = " + (app.dir || "") + "\n" +
+      "SPACE                 = " + app.space + "\n" +
+      "PORT                  = " + p + "\n" +
+      "DATABASE_TEMPLATE_URL = " + (app.template_db_url || "");
 
     // Auto-reload when proxy switches to a new healthy port
     if (String(p) !== lastPort && app.health_status === "healthy" && !reloading) {
@@ -596,47 +616,71 @@ var dashboardTmpl = template.Must(template.New("dashboard").Parse(`<!DOCTYPE htm
 </head>
 <body>
 <h1>Spacecat</h1>
-<div class="status">
+<div class="status" id="status-bar">
   <span><span class="dot {{if .Status.PostgresRunning}}on{{else}}off{{end}}"></span> Postgres :{{.Status.PostgresPort}}</span>
-  <span>Uptime: {{.Status.Uptime}}</span>
-  <span>Apps: {{.Status.AppCount}}</span>
+  <span>Apps: <span id="app-count">{{.Status.AppCount}}</span></span>
 </div>
-{{if .Apps}}
-<table>
-<thead>
-<tr>
-  <th>Space</th>
-  <th>Config</th>
-  <th>Template DB</th>
-  <th>Proxy</th>
-  <th>Blue</th>
-  <th>Green</th>
-  <th>Active</th>
-  <th>Health</th>
-  <th>Watch</th>
-  <th>Logs</th>
-</tr>
-</thead>
-<tbody>
-{{range .Apps}}
-<tr>
-  <td><strong>{{.Space}}</strong></td>
-  <td><code>{{.ConfigFile}}</code></td>
-  <td><code>{{.TemplateDBURL}}</code></td>
-  <td>:{{.ProxyPort}}</td>
-  <td>:{{.BluePort}}</td>
-  <td>:{{.GreenPort}}</td>
-  <td>{{.ActiveColor}}</td>
-  <td class="{{.HealthStatus}}">{{.HealthStatus}}</td>
-  <td>{{range .WatchPatterns}}<code>{{.}}</code> {{end}}</td>
-  <td>{{len .RecentLogs}}</td>
-</tr>
-{{end}}
-</tbody>
-</table>
-{{else}}
-<div class="empty">No apps registered. Run <code>go run main.go</code> in a child app to register.</div>
-{{end}}
+<div id="app-table"></div>
+<script>
+(function() {
+  const table = document.getElementById("app-table");
+  const countEl = document.getElementById("app-count");
+  let apps = {};
+
+  function render() {
+    const list = Object.values(apps);
+    countEl.textContent = list.length;
+    if (list.length === 0) {
+      table.innerHTML = '<div class="empty">No apps registered. Run <code>go run main.go</code> in a child app to register.</div>';
+      return;
+    }
+    let h = '<table><thead><tr>' +
+      '<th>Space</th><th>Config</th><th>Template DB</th>' +
+      '<th>Proxy</th><th>Blue</th><th>Green</th><th>Active</th>' +
+      '<th>Health</th><th>Watch</th><th>Logs</th></tr></thead><tbody>';
+    for (const a of list) {
+      const watch = (a.watch_patterns || []).map(p => '<code>' + p + '</code>').join(' ');
+      h += '<tr>' +
+        '<td><strong>' + a.space + '</strong></td>' +
+        '<td><code>' + (a.config_file || '') + '</code></td>' +
+        '<td><code>' + (a.template_db_url || '') + '</code></td>' +
+        '<td>:' + a.proxy_port + '</td>' +
+        '<td>:' + a.blue_port + '</td>' +
+        '<td>:' + a.green_port + '</td>' +
+        '<td>' + a.active_color + '</td>' +
+        '<td class="' + a.health_status + '">' + a.health_status + '</td>' +
+        '<td>' + watch + '</td>' +
+        '<td>' + (a.recent_logs || []).length + '</td></tr>';
+    }
+    h += '</tbody></table>';
+    table.innerHTML = h;
+  }
+
+  const es = new EventSource("/_spaces/api/events");
+
+  es.addEventListener("init", function(e) {
+    const list = JSON.parse(e.data);
+    apps = {};
+    for (const a of list) apps[a.space] = a;
+    render();
+  });
+
+  es.addEventListener("app", function(e) {
+    const a = JSON.parse(e.data);
+    apps[a.space] = a;
+    render();
+  });
+
+  es.addEventListener("deregister", function(e) {
+    const data = JSON.parse(e.data);
+    delete apps[data.space];
+    render();
+  });
+
+  // Initial render from server data
+  render();
+})();
+</script>
 </body>
 </html>`))
 

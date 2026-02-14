@@ -32,9 +32,11 @@ func Run() {
 		os.Exit(1)
 	}
 
-	logger.Info("registering with spacecat", "space", space, "url", spacecatURL)
+	dir, _ := os.Getwd()
+	logger.Info("registering with spacecat", "space", space, "url", spacecatURL, "dir", dir)
 	resp, err := register(spacecatURL, api.RegisterRequest{
 		Space:         space,
+		Dir:           dir,
 		ConfigFile:    ".envrc",
 		WatchPatterns: []string{"*.go"},
 	})
@@ -69,7 +71,6 @@ func Run() {
 	runner.updateHealth("healthy")
 
 	// File watcher
-	dir, _ := os.Getwd()
 	w := watch.New(dir, []string{"*.go"}, nil, func(path string) {
 		logger.Info("file changed, rebuilding", "path", path)
 		runner.rebuild()
