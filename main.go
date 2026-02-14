@@ -1,10 +1,12 @@
 package main
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -17,7 +19,10 @@ func main() {
 	slog.SetDefault(logger)
 
 	runner := &proxyRunner{logger: logger}
-	runner.start()
+	if err := runner.start(); err != nil {
+		logger.Error("failed to start proxy", "error", err)
+		os.Exit(1)
+	}
 
 	// Watch spacecat source files, ignoring child apps
 	cwd, _ := os.Getwd()
@@ -49,29 +54,49 @@ func main() {
 	logger.Info("shutdown complete")
 }
 
+var binPath = filepath.Join(".spacecat", "spacecat")
+
 type proxyRunner struct {
 	logger *slog.Logger
 	cmd    *exec.Cmd
+	done   chan struct{} // closed when cmd.Wait() returns
 	mu     sync.Mutex
 }
 
-func (r *proxyRunner) start() {
+func (r *proxyRunner) start() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.startLocked()
+	return r.buildAndStartLocked()
 }
 
-func (r *proxyRunner) startLocked() {
-	cmd := exec.Command("go", "run", "./cmd/spacecat")
+func (r *proxyRunner) buildAndStartLocked() error {
+	os.MkdirAll(".spacecat", 0o755)
+
+	// Build the binary directly — avoids the go run wrapper process
+	// which doesn't forward signals to its child
+	build := exec.Command("go", "build", "-o", binPath, "./cmd/spacecat")
+	build.Stdout = os.Stdout
+	build.Stderr = os.Stderr
+	if err := build.Run(); err != nil {
+		return fmt.Errorf("build: %w", err)
+	}
+
+	cmd := exec.Command(binPath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
-		r.logger.Error("failed to start proxy", "error", err)
-		return
+		return fmt.Errorf("start: %w", err)
 	}
+
 	r.cmd = cmd
+	r.done = make(chan struct{})
+	go func() {
+		cmd.Wait()
+		close(r.done)
+	}()
+
 	r.logger.Info("proxy started", "pid", cmd.Process.Pid)
-	go cmd.Wait()
+	return nil
 }
 
 func (r *proxyRunner) stop() {
@@ -85,16 +110,11 @@ func (r *proxyRunner) stopLocked() {
 		return
 	}
 	r.cmd.Process.Signal(syscall.SIGTERM)
-	done := make(chan struct{})
-	go func() {
-		r.cmd.Process.Wait()
-		close(done)
-	}()
 	select {
-	case <-done:
+	case <-r.done:
 	case <-time.After(5 * time.Second):
 		r.cmd.Process.Kill()
-		<-done
+		<-r.done
 	}
 	r.cmd = nil
 }
@@ -103,5 +123,7 @@ func (r *proxyRunner) restart() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.stopLocked()
-	r.startLocked()
+	if err := r.buildAndStartLocked(); err != nil {
+		r.logger.Error("failed to restart proxy", "error", err)
+	}
 }

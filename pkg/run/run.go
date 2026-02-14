@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -38,7 +39,7 @@ func Run() {
 		Space:         space,
 		Dir:           dir,
 		ConfigFile:    ".envrc",
-		WatchPatterns: []string{"*.go"},
+		WatchPatterns: []string{"*.go", "go.mod"},
 	})
 	if err != nil {
 		logger.Error("failed to register", "error", err)
@@ -70,9 +71,9 @@ func Run() {
 	runner.updateHealth("healthy")
 
 	// File watcher
-	w := watch.New(dir, []string{"*.go"}, nil, func(path string) {
+	w := watch.New(dir, []string{"*.go", "go.mod"}, nil, func(path string) {
 		logger.Info("file changed, rebuilding", "path", path)
-		runner.rebuild()
+		runner.rebuild(path)
 	})
 	w.Start()
 
@@ -113,8 +114,11 @@ func (r *appRunner) buildAndStart(color string) error {
 
 	port := r.portForColor(color)
 
-	// Build
-	build := exec.Command("go", "build", "-o", "./app", "./cmd/app")
+	// Build into .spacecat/ (gitignored, watcher-ignored)
+	binPath := filepath.Join(".spacecat", "app")
+	os.MkdirAll(".spacecat", 0o755)
+
+	build := exec.Command("go", "build", "-o", binPath, "./cmd/app")
 	build.Stdout = os.Stdout
 	build.Stderr = os.Stderr
 	build.Env = append(os.Environ(),
@@ -126,7 +130,7 @@ func (r *appRunner) buildAndStart(color string) error {
 	}
 
 	// Run
-	cmd := exec.Command("./app")
+	cmd := exec.Command(binPath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Env = append(os.Environ(),
@@ -150,11 +154,25 @@ func (r *appRunner) buildAndStart(color string) error {
 }
 
 // rebuild does a zero-downtime blue/green deploy:
-// 1. Build + start on the inactive color
-// 2. Wait for the new process to be healthy
-// 3. Swap activeColor (proxy switches)
-// 4. Stop the old process
-func (r *appRunner) rebuild() {
+// 1. Run pre-build hooks based on changed file
+// 2. Build + start on the inactive color
+// 3. Wait for the new process to be healthy
+// 4. Swap activeColor (proxy switches)
+// 5. Stop the old process
+func (r *appRunner) rebuild(changedPath string) {
+	// Pre-build hooks
+	if filepath.Base(changedPath) == "go.mod" {
+		r.logger.Info("go.mod changed, running go mod tidy")
+		tidy := exec.Command("go", "mod", "tidy")
+		tidy.Stdout = os.Stdout
+		tidy.Stderr = os.Stderr
+		if err := tidy.Run(); err != nil {
+			r.logger.Error("go mod tidy failed", "error", err)
+			r.sendLog("error", fmt.Sprintf("go mod tidy failed: %v", err))
+			return
+		}
+	}
+
 	r.mu.Lock()
 	oldColor := r.activeColor
 	newColor := "green"
