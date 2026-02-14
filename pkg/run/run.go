@@ -57,11 +57,16 @@ func Run() {
 		logger:      logger,
 	}
 
-	// Initial build + run
-	if err := runner.buildAndRun(); err != nil {
+	// Initial build + run on blue
+	if err := runner.buildAndStart("blue"); err != nil {
 		logger.Error("initial build failed", "error", err)
 		os.Exit(1)
 	}
+	runner.updateHealth("unknown")
+
+	// Wait for initial health before announcing
+	runner.waitForHealthy(runner.portForColor("blue"))
+	runner.updateHealth("healthy")
 
 	// File watcher
 	dir, _ := os.Getwd()
@@ -78,7 +83,7 @@ func Run() {
 
 	logger.Info("shutting down")
 	w.Stop()
-	runner.stopCurrent()
+	runner.stopAll()
 	deregister(spacecatURL, space)
 }
 
@@ -87,21 +92,26 @@ type appRunner struct {
 	space       string
 	resp        *api.RegisterResponse
 	activeColor string
-	currentCmd  *exec.Cmd
+	blueCmd     *exec.Cmd
+	greenCmd    *exec.Cmd
 	mu          sync.Mutex
 	logger      *slog.Logger
 }
 
-func (r *appRunner) activePort() int {
-	if r.activeColor == "green" {
+func (r *appRunner) portForColor(color string) int {
+	if color == "green" {
 		return r.resp.GreenPort
 	}
 	return r.resp.BluePort
 }
 
-func (r *appRunner) buildAndRun() error {
+// buildAndStart builds the binary and starts it on the given color's port.
+// Does NOT stop any existing process or change activeColor.
+func (r *appRunner) buildAndStart(color string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	port := r.portForColor(color)
 
 	// Build
 	build := exec.Command("go", "build", "-o", "./app", "./cmd/app")
@@ -114,8 +124,6 @@ func (r *appRunner) buildAndRun() error {
 	if err := build.Run(); err != nil {
 		return fmt.Errorf("build: %w", err)
 	}
-
-	port := r.activePort()
 
 	// Run
 	cmd := exec.Command("./app")
@@ -131,46 +139,105 @@ func (r *appRunner) buildAndRun() error {
 		return fmt.Errorf("run: %w", err)
 	}
 
-	r.currentCmd = cmd
-	r.logger.Info("app started", "port", port, "color", r.activeColor, "pid", cmd.Process.Pid)
+	if color == "green" {
+		r.greenCmd = cmd
+	} else {
+		r.blueCmd = cmd
+	}
 
-	// Health check in background
-	go r.healthCheckLoop(port)
-
+	r.logger.Info("app started", "port", port, "color", color, "pid", cmd.Process.Pid)
 	return nil
 }
 
+// rebuild does a zero-downtime blue/green deploy:
+// 1. Build + start on the inactive color
+// 2. Wait for the new process to be healthy
+// 3. Swap activeColor (proxy switches)
+// 4. Stop the old process
 func (r *appRunner) rebuild() {
 	r.mu.Lock()
-	if r.activeColor == "blue" {
-		r.activeColor = "green"
-	} else {
-		r.activeColor = "blue"
+	oldColor := r.activeColor
+	newColor := "green"
+	if oldColor == "green" {
+		newColor = "blue"
 	}
 	r.mu.Unlock()
 
-	r.stopCurrent()
+	r.logger.Info("blue/green deploy", "old", oldColor, "new", newColor)
 
-	if err := r.buildAndRun(); err != nil {
+	// Build + start new
+	if err := r.buildAndStart(newColor); err != nil {
 		r.logger.Error("rebuild failed", "error", err)
 		r.sendLog("error", fmt.Sprintf("rebuild failed: %v", err))
-		// Swap back
-		r.mu.Lock()
-		if r.activeColor == "blue" {
-			r.activeColor = "green"
-		} else {
-			r.activeColor = "blue"
-		}
-		r.mu.Unlock()
+		return
 	}
+
+	// Wait for new to be healthy
+	newPort := r.portForColor(newColor)
+	if !r.waitForHealthy(newPort) {
+		r.logger.Error("new process failed health check, aborting swap")
+		r.sendLog("error", "new process failed health check")
+		r.stopColor(newColor)
+		return
+	}
+
+	// Swap — proxy now routes to the new color
+	r.mu.Lock()
+	r.activeColor = newColor
+	r.mu.Unlock()
+	r.updateHealth("healthy")
+	r.logger.Info("swapped", "active", newColor, "port", newPort)
+
+	// Stop old
+	r.stopColor(oldColor)
 }
 
-func (r *appRunner) stopCurrent() {
+// waitForHealthy polls the health endpoint until healthy or timeout.
+func (r *appRunner) waitForHealthy(port int) bool {
+	client := &http.Client{Timeout: 1 * time.Second}
+	url := fmt.Sprintf("http://localhost:%d/health", port)
+
+	for i := 0; i < 30; i++ { // 30 * 500ms = 15s max
+		time.Sleep(500 * time.Millisecond)
+		resp, err := client.Get(url)
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (r *appRunner) stopColor(color string) {
 	r.mu.Lock()
-	cmd := r.currentCmd
-	r.currentCmd = nil
+	var cmd *exec.Cmd
+	if color == "green" {
+		cmd = r.greenCmd
+		r.greenCmd = nil
+	} else {
+		cmd = r.blueCmd
+		r.blueCmd = nil
+	}
 	r.mu.Unlock()
 
+	stopProcess(cmd)
+}
+
+func (r *appRunner) stopAll() {
+	r.mu.Lock()
+	blue := r.blueCmd
+	green := r.greenCmd
+	r.blueCmd = nil
+	r.greenCmd = nil
+	r.mu.Unlock()
+
+	stopProcess(blue)
+	stopProcess(green)
+}
+
+func stopProcess(cmd *exec.Cmd) {
 	if cmd == nil || cmd.Process == nil {
 		return
 	}
@@ -188,36 +255,16 @@ func (r *appRunner) stopCurrent() {
 	}
 }
 
-func (r *appRunner) healthCheckLoop(port int) {
-	client := &http.Client{Timeout: 2 * time.Second}
-	url := fmt.Sprintf("http://localhost:%d/health", port)
-
-	for {
-		time.Sleep(5 * time.Second)
-
-		r.mu.Lock()
-		if r.currentCmd == nil || r.activePort() != port {
-			r.mu.Unlock()
-			return
-		}
-		r.mu.Unlock()
-
-		resp, err := client.Get(url)
-		status := "unhealthy"
-		if err == nil {
-			resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				status = "healthy"
-			}
-		}
-
-		r.updateHealth(status)
-	}
-}
-
 func (r *appRunner) updateHealth(status string) {
-	body, _ := json.Marshal(map[string]string{"status": status})
-	url := fmt.Sprintf("%s/api/apps/%s/health", r.spacecatURL, r.space)
+	r.mu.Lock()
+	color := r.activeColor
+	r.mu.Unlock()
+
+	body, _ := json.Marshal(map[string]string{
+		"status":       status,
+		"active_color": color,
+	})
+	url := fmt.Sprintf("%s/_spaces/api/apps/%s/health", r.spacecatURL, r.space)
 	req, _ := http.NewRequest(http.MethodPut, url, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	http.DefaultClient.Do(req)
@@ -230,7 +277,7 @@ func (r *appRunner) sendLog(level, message string) {
 		Message:   message,
 	}}
 	body, _ := json.Marshal(entries)
-	url := fmt.Sprintf("%s/api/apps/%s/logs", r.spacecatURL, r.space)
+	url := fmt.Sprintf("%s/_spaces/api/apps/%s/logs", r.spacecatURL, r.space)
 	http.Post(url, "application/json", bytes.NewReader(body))
 }
 
@@ -254,7 +301,7 @@ func register(spacecatURL string, req api.RegisterRequest) (*api.RegisterRespons
 	if err != nil {
 		return nil, err
 	}
-	resp, err := http.Post(spacecatURL+"/api/apps", "application/json", bytes.NewReader(body))
+	resp, err := http.Post(spacecatURL+"/_spaces/api/apps", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -270,7 +317,7 @@ func register(spacecatURL string, req api.RegisterRequest) (*api.RegisterRespons
 }
 
 func deregister(spacecatURL, space string) {
-	req, _ := http.NewRequest(http.MethodDelete, spacecatURL+"/api/apps/"+space, nil)
+	req, _ := http.NewRequest(http.MethodDelete, spacecatURL+"/_spaces/api/apps/"+space, nil)
 	http.DefaultClient.Do(req)
 }
 

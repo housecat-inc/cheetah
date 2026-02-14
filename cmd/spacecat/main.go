@@ -1,13 +1,20 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"html/template"
+	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -54,10 +61,15 @@ func main() {
 	e.HideBanner = true
 	e.Use(middleware.Recover())
 	e.Use(middleware.RequestLoggerWithConfig(middleware.RequestLoggerConfig{
-		LogStatus: true,
-		LogURI:    true,
-		LogMethod: true,
+		LogStatus:   true,
+		LogURI:      true,
+		LogMethod:   true,
+		LogLatency:  true,
+		HandleError: true,
 		LogValuesFunc: func(c echo.Context, v middleware.RequestLoggerValues) error {
+			if strings.HasPrefix(v.URI, "/_spaces/api/events") {
+				return nil // don't log SSE connections
+			}
 			logger.Info("request",
 				"method", v.Method,
 				"uri", v.URI,
@@ -67,22 +79,28 @@ func main() {
 		},
 	}))
 
-	// API routes
-	a := e.Group("/api")
-	a.GET("/status", reg.handleStatus)
-	a.GET("/apps", reg.handleListApps)
-	a.POST("/apps", reg.handleRegisterApp)
-	a.GET("/apps/:space", reg.handleGetApp)
-	a.DELETE("/apps/:space", reg.handleDeregisterApp)
-	a.POST("/apps/:space/logs", reg.handleAppendLogs)
-	a.PUT("/apps/:space/health", reg.handleUpdateHealth)
+	// Dashboard and API under /_spaces/
+	s := e.Group("/_spaces")
+	s.GET("/", reg.handleDashboard)
+	s.GET("/api/status", reg.handleStatus)
+	s.GET("/api/apps", reg.handleListApps)
+	s.POST("/api/apps", reg.handleRegisterApp)
+	s.GET("/api/apps/:space", reg.handleGetApp)
+	s.DELETE("/api/apps/:space", reg.handleDeregisterApp)
+	s.POST("/api/apps/:space/logs", reg.handleAppendLogs)
+	s.PUT("/api/apps/:space/health", reg.handleUpdateHealth)
+	s.GET("/api/events", reg.handleSSE)
 
-	// Dashboard
-	e.GET("/", reg.handleDashboard)
+	// Status bubble JS
+	e.GET("/_spaces.js", reg.handleSpacesJS)
+
+	// Reverse proxy catch-all — must be last
+	e.Any("/*", reg.handleProxy)
+	e.Any("/", reg.handleProxy)
 
 	go func() {
 		addr := fmt.Sprintf(":%d", dashboardPort)
-		logger.Info("starting dashboard", "addr", addr)
+		logger.Info("starting spacecat", "addr", addr)
 		if err := e.Start(addr); err != nil && err != http.ErrServerClosed {
 			logger.Error("server error", "error", err)
 		}
@@ -110,12 +128,17 @@ func main() {
 type registry struct {
 	mu              sync.RWMutex
 	apps            map[string]*api.App
+	lastRegistered  string
 	nextProxyPort   int
 	nextBluePort    int
 	postgresRunning bool
 	postgresURL     string
 	startTime       time.Time
 	logger          *slog.Logger
+
+	// SSE subscribers
+	subMu       sync.Mutex
+	subscribers map[chan []byte]struct{}
 }
 
 func newRegistry(logger *slog.Logger) *registry {
@@ -125,7 +148,41 @@ func newRegistry(logger *slog.Logger) *registry {
 		nextBluePort:  bluePortStart,
 		startTime:     time.Now(),
 		logger:        logger,
+		subscribers:   make(map[chan []byte]struct{}),
 	}
+}
+
+// broadcast sends an SSE event to all connected clients.
+func (r *registry) broadcast(event string, data any) {
+	payload, err := json.Marshal(data)
+	if err != nil {
+		return
+	}
+	msg := []byte(fmt.Sprintf("event: %s\ndata: %s\n\n", event, payload))
+
+	r.subMu.Lock()
+	defer r.subMu.Unlock()
+	for ch := range r.subscribers {
+		select {
+		case ch <- msg:
+		default: // drop if subscriber is slow
+		}
+	}
+}
+
+func (r *registry) subscribe() chan []byte {
+	ch := make(chan []byte, 16)
+	r.subMu.Lock()
+	r.subscribers[ch] = struct{}{}
+	r.subMu.Unlock()
+	return ch
+}
+
+func (r *registry) unsubscribe(ch chan []byte) {
+	r.subMu.Lock()
+	delete(r.subscribers, ch)
+	r.subMu.Unlock()
+	close(ch)
 }
 
 func (r *registry) register(req api.RegisterRequest) (*api.App, error) {
@@ -158,6 +215,7 @@ func (r *registry) register(req api.RegisterRequest) (*api.App, error) {
 		RegisteredAt:   time.Now(),
 	}
 	r.apps[req.Space] = app
+	r.lastRegistered = req.Space
 	return app, nil
 }
 
@@ -185,7 +243,33 @@ func (r *registry) deregister(space string) bool {
 		return false
 	}
 	delete(r.apps, space)
+	if r.lastRegistered == space {
+		r.lastRegistered = ""
+		for name := range r.apps {
+			r.lastRegistered = name
+			break
+		}
+	}
 	return true
+}
+
+// activeTarget returns the most recently registered app's active port.
+func (r *registry) activeTarget() (space string, port int, ok bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if r.lastRegistered == "" {
+		return "", 0, false
+	}
+	app, exists := r.apps[r.lastRegistered]
+	if !exists {
+		return "", 0, false
+	}
+
+	if app.ActiveColor == "green" {
+		return app.Space, app.GreenPort, true
+	}
+	return app.Space, app.BluePort, true
 }
 
 func (r *registry) status() api.Status {
@@ -214,7 +298,7 @@ func (r *registry) appendLogs(space string, entries []api.LogEntry) bool {
 	return true
 }
 
-func (r *registry) updateHealth(space, status string) bool {
+func (r *registry) updateHealth(space, status, activeColor string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	app, ok := r.apps[space]
@@ -223,6 +307,9 @@ func (r *registry) updateHealth(space, status string) bool {
 	}
 	app.HealthStatus = status
 	app.LastHealthCheck = time.Now()
+	if activeColor == "blue" || activeColor == "green" {
+		app.ActiveColor = activeColor
+	}
 	return true
 }
 
@@ -251,6 +338,8 @@ func (r *registry) handleRegisterApp(c echo.Context) error {
 	}
 
 	r.logger.Info("app registered", "space", app.Space, "proxy", app.ProxyPort)
+	r.broadcast("app", app)
+
 	return c.JSON(http.StatusCreated, api.RegisterResponse{
 		Space:         app.Space,
 		ProxyPort:     app.ProxyPort,
@@ -275,6 +364,7 @@ func (r *registry) handleDeregisterApp(c echo.Context) error {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "not found"})
 	}
 	r.logger.Info("app deregistered", "space", space)
+	r.broadcast("deregister", map[string]string{"space": space})
 	return c.NoContent(http.StatusNoContent)
 }
 
@@ -293,16 +383,192 @@ func (r *registry) handleAppendLogs(c echo.Context) error {
 func (r *registry) handleUpdateHealth(c echo.Context) error {
 	space := c.Param("space")
 	var body struct {
-		Status string `json:"status"`
+		Status      string `json:"status"`
+		ActiveColor string `json:"active_color"`
 	}
 	if err := c.Bind(&body); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 	}
-	if !r.updateHealth(space, body.Status) {
+	if !r.updateHealth(space, body.Status, body.ActiveColor) {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "not found"})
 	}
+
+	// Broadcast updated app state to SSE clients
+	if app, ok := r.get(space); ok {
+		r.broadcast("app", app)
+	}
+
 	return c.NoContent(http.StatusNoContent)
 }
+
+// SSE handler
+
+func (r *registry) handleSSE(c echo.Context) error {
+	w := c.Response()
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+
+	// Send current state immediately
+	apps := r.list()
+	payload, _ := json.Marshal(apps)
+	fmt.Fprintf(w, "event: init\ndata: %s\n\n", payload)
+	w.Flush()
+
+	ch := r.subscribe()
+	defer r.unsubscribe(ch)
+
+	ctx := c.Request().Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case msg, ok := <-ch:
+			if !ok {
+				return nil
+			}
+			w.Write(msg)
+			w.Flush()
+		}
+	}
+}
+
+// Reverse proxy handler
+
+func (r *registry) handleProxy(c echo.Context) error {
+	space, port, ok := r.activeTarget()
+	if !ok {
+		return c.Redirect(http.StatusTemporaryRedirect, "/_spaces/")
+	}
+
+	target, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", port))
+	proxy := &httputil.ReverseProxy{
+		Director: func(req *http.Request) {
+			req.URL.Scheme = target.Scheme
+			req.URL.Host = target.Host
+			req.Host = target.Host
+		},
+		FlushInterval: -1, // stream SSE immediately
+		ModifyResponse: func(resp *http.Response) error {
+			ct := resp.Header.Get("Content-Type")
+			if !strings.Contains(ct, "text/html") {
+				return nil
+			}
+			body, err := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if err != nil {
+				return err
+			}
+			injected := strings.Replace(
+				string(body),
+				"</body>",
+				fmt.Sprintf(`<script src="/_spaces.js" data-space="%s" data-port="%d"></script>`+"\n</body>", space, port),
+				1,
+			)
+			resp.Body = io.NopCloser(bytes.NewReader([]byte(injected)))
+			resp.ContentLength = int64(len(injected))
+			resp.Header.Set("Content-Length", strconv.Itoa(len(injected)))
+			return nil
+		},
+	}
+
+	proxy.ServeHTTP(c.Response(), c.Request())
+	return nil
+}
+
+// Status bubble JS — uses SSE instead of polling
+
+const spacesJS = `(function() {
+  const script = document.currentScript;
+  const space = script?.getAttribute("data-space") || "";
+  const initialPort = script?.getAttribute("data-port") || "";
+
+  const el = document.createElement("div");
+  el.id = "__spacecat";
+  el.innerHTML = '<span class="__sc-dot"></span> <span class="__sc-label"></span>';
+  document.body.appendChild(el);
+
+  const style = document.createElement("style");
+  style.textContent = ` + "`" + `
+    #__spacecat {
+      position: fixed; bottom: 12px; right: 12px; z-index: 2147483647;
+      background: #1a1a2e; color: #e0e0e0; border: 1px solid #2a2a3e;
+      border-radius: 20px; padding: 6px 14px; font: 12px/1 system-ui, sans-serif;
+      cursor: pointer; display: flex; align-items: center; gap: 6px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.4); transition: opacity 0.2s;
+      opacity: 0.85; user-select: none;
+    }
+    #__spacecat:hover { opacity: 1; }
+    .__sc-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: #888; display: inline-block;
+    }
+    .__sc-dot.healthy { background: #4ade80; }
+    .__sc-dot.unhealthy { background: #ef4444; }
+    .__sc-dot.unknown { background: #888; }
+    .__sc-dot.building { background: #facc15; }
+  ` + "`" + `;
+  document.head.appendChild(style);
+
+  const dot = el.querySelector(".__sc-dot");
+  const label = el.querySelector(".__sc-label");
+  label.textContent = space + " :" + initialPort;
+
+  el.addEventListener("click", function() {
+    window.open("/_spaces/", "_blank");
+  });
+
+  let lastPort = initialPort;
+  let reloading = false;
+
+  function update(app) {
+    if (!app || app.space !== space) return;
+
+    dot.className = "__sc-dot " + app.health_status;
+    const p = app.active_color === "green" ? app.green_port : app.blue_port;
+    label.textContent = app.space + " :" + p;
+
+    // Auto-reload when proxy switches to a new healthy port
+    if (String(p) !== lastPort && app.health_status === "healthy" && !reloading) {
+      reloading = true;
+      label.textContent = "reloading...";
+      setTimeout(() => location.reload(), 300);
+    }
+    lastPort = String(p);
+  }
+
+  const es = new EventSource("/_spaces/api/events");
+
+  es.addEventListener("init", function(e) {
+    const apps = JSON.parse(e.data);
+    const app = apps.find(a => a.space === space);
+    if (app) update(app);
+  });
+
+  es.addEventListener("app", function(e) {
+    update(JSON.parse(e.data));
+  });
+
+  es.addEventListener("deregister", function(e) {
+    const data = JSON.parse(e.data);
+    if (data.space === space) {
+      dot.className = "__sc-dot unhealthy";
+      label.textContent = space + " disconnected";
+    }
+  });
+
+  es.onerror = function() {
+    dot.className = "__sc-dot unhealthy";
+  };
+})();
+`
+
+func (r *registry) handleSpacesJS(c echo.Context) error {
+	return c.Blob(http.StatusOK, "application/javascript", []byte(spacesJS))
+}
+
+// Dashboard
 
 var dashboardTmpl = template.Must(template.New("dashboard").Parse(`<!DOCTYPE html>
 <html>

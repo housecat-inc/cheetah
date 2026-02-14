@@ -18,7 +18,13 @@ func main() {
 		if name == "" {
 			name = "world"
 		}
-		fmt.Fprintf(w, "Hello, %s! (space: %s)\n", name, space)
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprintf(w, `<!DOCTYPE html>
+<html><head><title>Greet</title></head>
+<body>
+<h1>Hello, %s!</h1>
+<p>space: %s &middot; port: %s</p>
+</body></html>`, name, space, port)
 	})
 
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
