@@ -27,10 +27,9 @@ import (
 )
 
 const (
-	dashboardPort  = 8080
-	postgresPort   = 54320
-	proxyPortStart = 3000
-	bluePortStart  = 4000
+	dashboardPort = 50000
+	postgresPort  = 54320
+	bluePortStart = 4000
 	maxRecentLogs  = 100
 )
 
@@ -129,7 +128,6 @@ type registry struct {
 	mu              sync.RWMutex
 	apps            map[string]*api.App
 	lastRegistered  string
-	nextProxyPort   int
 	nextBluePort    int
 	postgresRunning bool
 	postgresURL     string
@@ -144,7 +142,6 @@ type registry struct {
 func newRegistry(logger *slog.Logger) *registry {
 	return &registry{
 		apps:          make(map[string]*api.App),
-		nextProxyPort: proxyPortStart,
 		nextBluePort:  bluePortStart,
 		startTime:     time.Now(),
 		logger:        logger,
@@ -193,10 +190,8 @@ func (r *registry) register(req api.RegisterRequest) (*api.App, error) {
 		return nil, fmt.Errorf("space %q already registered", req.Space)
 	}
 
-	proxy := r.nextProxyPort
 	blue := r.nextBluePort
 	green := r.nextBluePort + 1
-	r.nextProxyPort++
 	r.nextBluePort += 2
 
 	app := &api.App{
@@ -207,7 +202,6 @@ func (r *registry) register(req api.RegisterRequest) (*api.App, error) {
 		DatabaseURL:    fmt.Sprintf("postgres://localhost:%d/%s?sslmode=disable", postgresPort, req.Space),
 		WatchPatterns:  req.WatchPatterns,
 		IgnorePatterns: req.IgnorePatterns,
-		ProxyPort:      proxy,
 		BluePort:       blue,
 		GreenPort:      green,
 		ActiveColor:    "blue",
@@ -366,12 +360,11 @@ func (r *registry) handleRegisterApp(c echo.Context) error {
 		return c.JSON(http.StatusConflict, map[string]string{"error": err.Error()})
 	}
 
-	r.logger.Info("app registered", "space", app.Space, "proxy", app.ProxyPort)
+	r.logger.Info("app registered", "space", app.Space)
 	r.broadcast("app", app)
 
 	return c.JSON(http.StatusCreated, api.RegisterResponse{
 		Space:         app.Space,
-		ProxyPort:     app.ProxyPort,
 		BluePort:      app.BluePort,
 		GreenPort:     app.GreenPort,
 		TemplateDBURL: app.TemplateDBURL,

@@ -10,7 +10,6 @@ type App struct {
 	DatabaseURL     string     `json:"database_url"`
 	WatchPatterns   []string   `json:"watch_patterns"`
 	IgnorePatterns  []string   `json:"ignore_patterns"`
-	ProxyPort       int        `json:"proxy_port"`
 	BluePort        int        `json:"blue_port"`
 	GreenPort       int        `json:"green_port"`
 	ActiveColor     string     `json:"active_color"`
@@ -44,7 +43,6 @@ type RegisterRequest struct {
 
 type RegisterResponse struct {
 	Space         string `json:"space"`
-	ProxyPort     int    `json:"proxy_port"`
 	BluePort      int    `json:"blue_port"`
 	GreenPort     int    `json:"green_port"`
 	TemplateDBURL string `json:"template_db_url"`

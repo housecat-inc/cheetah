@@ -18,7 +18,7 @@ import (
 	"github.com/housecat-inc/spacecat/pkg/watch"
 )
 
-const defaultSpacecatURL = "http://localhost:8080"
+const defaultSpacecatURL = "http://localhost:50000"
 
 // Run registers with the spacecat dashboard, watches for file changes,
 // and manages a blue/green build/run cycle. It blocks until interrupted.
@@ -45,7 +45,6 @@ func Run() {
 		os.Exit(1)
 	}
 	logger.Info("registered",
-		"proxy_port", resp.ProxyPort,
 		"blue_port", resp.BluePort,
 		"green_port", resp.GreenPort,
 		"database_url", resp.DatabaseURL,
@@ -288,9 +287,12 @@ func determineSpace() (string, error) {
 	if space := os.Getenv("SPACE"); space != "" {
 		return space, nil
 	}
+	if space := os.Getenv("CONDUCTOR_WORKSPACE_NAME"); space != "" {
+		return space, nil
+	}
 	out, err := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD").Output()
 	if err != nil {
-		return "", fmt.Errorf("set SPACE env var or run in a git repo")
+		return "", fmt.Errorf("set SPACE or CONDUCTOR_WORKSPACE_NAME env var, or run in a git repo")
 	}
 	branch := strings.TrimSpace(string(out))
 	branch = strings.ReplaceAll(branch, "/", "-")
