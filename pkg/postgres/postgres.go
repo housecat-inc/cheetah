@@ -22,7 +22,7 @@ const (
 // Postgres instance. The instance runs as an independent daemon — it is
 // never stopped by this function. Data persists in ~/.spacecat/pg-data/.
 func EnsureRunning() (string, error) {
-	pgURL := fmt.Sprintf("postgres://localhost:%d/postgres?sslmode=disable", port)
+	pgURL := fmt.Sprintf("postgres://postgres:postgres@localhost:%d/postgres?sslmode=disable", port)
 
 	// Fast path: already running
 	if isRunning() {

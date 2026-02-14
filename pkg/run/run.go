@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/housecat-inc/spacecat/pkg/api"
+	"github.com/housecat-inc/spacecat/pkg/db"
 	"github.com/housecat-inc/spacecat/pkg/watch"
 )
 
@@ -39,7 +40,7 @@ func Run() {
 		Space:         space,
 		Dir:           dir,
 		ConfigFile:    ".envrc",
-		WatchPatterns: []string{"*.go", "go.mod"},
+		WatchPatterns: []string{"*.go", "go.mod", "*.sql"},
 	})
 	if err != nil {
 		logger.Error("failed to register", "error", err)
@@ -59,6 +60,22 @@ func Run() {
 		logger:      logger,
 	}
 
+	// Ensure database (template + clone) before first build
+	if err := runner.ensureDatabase(); err != nil {
+		logger.Error("database setup failed", "error", err)
+		os.Exit(1)
+	}
+
+	// Run go generate if sqlc config exists
+	if db.HasSqlcConfig(".") {
+		gen := exec.Command("go", "generate", "./...")
+		gen.Stdout = os.Stdout
+		gen.Stderr = os.Stderr
+		if err := gen.Run(); err != nil {
+			logger.Warn("go generate failed", "error", err)
+		}
+	}
+
 	// Initial build + run on blue
 	if err := runner.buildAndStart("blue"); err != nil {
 		logger.Error("initial build failed", "error", err)
@@ -71,7 +88,7 @@ func Run() {
 	runner.updateHealth("healthy")
 
 	// File watcher
-	w := watch.New(dir, []string{"*.go", "go.mod"}, nil, func(path string) {
+	w := watch.New(dir, []string{"*.go", "go.mod", "*.sql"}, nil, func(path string) {
 		logger.Info("file changed, rebuilding", "path", path)
 		runner.rebuild(path)
 	})
@@ -173,6 +190,23 @@ func (r *appRunner) rebuild(changedPath string) {
 		}
 	}
 
+	if strings.HasSuffix(changedPath, ".sql") {
+		r.logger.Info("sql changed, rebuilding database", "path", changedPath)
+		if err := r.ensureDatabase(); err != nil {
+			r.logger.Error("database rebuild failed", "error", err)
+			r.sendLog("error", fmt.Sprintf("database rebuild failed: %v", err))
+			return
+		}
+		if db.HasSqlcConfig(".") {
+			gen := exec.Command("go", "generate", "./...")
+			gen.Stdout = os.Stdout
+			gen.Stderr = os.Stderr
+			if err := gen.Run(); err != nil {
+				r.logger.Warn("go generate failed", "error", err)
+			}
+		}
+	}
+
 	r.mu.Lock()
 	oldColor := r.activeColor
 	newColor := "green"
@@ -253,6 +287,42 @@ func (r *appRunner) stopAll() {
 
 	stopProcess(blue)
 	stopProcess(green)
+}
+
+// ensureDatabase discovers migrations, hashes them, creates/updates the
+// template DB, and clones it to the app's database.
+func (r *appRunner) ensureDatabase() error {
+	migDir, err := db.FindMigrationDir(".")
+	if err != nil {
+		return nil // no migrations, skip silently
+	}
+
+	hash, err := db.HashMigrations(migDir)
+	if err != nil {
+		return fmt.Errorf("hash migrations: %w", err)
+	}
+
+	adminURL, err := db.AdminURL(r.resp.DatabaseURL)
+	if err != nil {
+		return fmt.Errorf("admin url: %w", err)
+	}
+
+	tmplName, err := db.EnsureTemplate(adminURL, migDir, hash)
+	if err != nil {
+		return fmt.Errorf("ensure template: %w", err)
+	}
+
+	appDBName, err := db.DBNameFromURL(r.resp.DatabaseURL)
+	if err != nil {
+		return fmt.Errorf("db name: %w", err)
+	}
+
+	if err := db.CloneDB(adminURL, tmplName, appDBName); err != nil {
+		return fmt.Errorf("clone db: %w", err)
+	}
+
+	r.logger.Info("database ready", "template", tmplName, "database", appDBName)
+	return nil
 }
 
 func stopProcess(cmd *exec.Cmd) {
