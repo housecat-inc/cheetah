@@ -7,13 +7,18 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"time"
 
 	_ "github.com/lib/pq"
+	"github.com/lmittmann/tint"
 
 	"github.com/housecat-inc/spacecat/apps/greet/internal/db"
 )
 
 func main() {
+	space := os.Getenv("SPACE")
+	slog.SetDefault(slog.New(tint.NewHandler(os.Stderr, &tint.Options{Level: slog.LevelInfo, TimeFormat: time.Kitchen})).With("app", space))
+
 	port := os.Getenv("PORT")
 	dbURL := os.Getenv("DATABASE_URL")
 
@@ -131,8 +136,31 @@ func main() {
 	})
 
 	slog.Info("listening", "addr", ":"+port)
-	if err := http.ListenAndServe(":"+port, nil); err != nil {
+	if err := http.ListenAndServe(":"+port, requestLogger(http.DefaultServeMux)); err != nil {
 		slog.Error("server error", "error", err)
 		os.Exit(1)
 	}
+}
+
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func requestLogger(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		start := time.Now()
+		sw := &statusWriter{ResponseWriter: w, status: 200}
+		next.ServeHTTP(sw, r)
+		slog.Info("request", "method", r.Method, "uri", r.URL.RequestURI(), "status", sw.status, "dur", time.Since(start).Round(time.Millisecond))
+	})
 }

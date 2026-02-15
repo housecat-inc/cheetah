@@ -112,7 +112,6 @@ func EnsureTemplate(pgURL string, migrationsDir string, hash string) (string, er
 		return "", fmt.Errorf("check template db: %w", err)
 	}
 	if exists {
-		slog.Info("template db already exists", "name", tmplName)
 		return tmplName, nil
 	}
 
@@ -138,7 +137,6 @@ func EnsureTemplate(pgURL string, migrationsDir string, hash string) (string, er
 		return "", fmt.Errorf("run migrations: %w", err)
 	}
 
-	slog.Info("template db ready", "name", tmplName)
 	return tmplName, nil
 }
 
@@ -164,7 +162,6 @@ func CloneDB(pgURL string, templateDB string, targetDB string) error {
 	}
 
 	// Create from template
-	slog.Info("cloning database", "template", templateDB, "target", targetDB)
 	if _, err := adminDB.Exec(fmt.Sprintf(
 		"CREATE DATABASE %s TEMPLATE %s",
 		quoteIdent(targetDB), quoteIdent(templateDB),

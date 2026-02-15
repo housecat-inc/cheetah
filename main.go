@@ -11,11 +11,22 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/lmittmann/tint"
+
 	"github.com/housecat-inc/spacecat/pkg/watch"
 )
 
 func main() {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger := slog.New(tint.NewHandler(os.Stderr, &tint.Options{
+		Level:      slog.LevelInfo,
+		TimeFormat: time.Kitchen,
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.LevelKey {
+				return tint.Attr(5, slog.String(slog.LevelKey, "DEV")) // magenta DEV label
+			}
+			return a
+		},
+	}))
 	slog.SetDefault(logger)
 
 	runner := &proxyRunner{logger: logger}
@@ -38,7 +49,11 @@ func main() {
 			restartTimer.Stop()
 		}
 		restartTimer = time.AfterFunc(500*time.Millisecond, func() {
-			logger.Info("source changed, restarting proxy", "path", path)
+			rel := path
+			if r, err := filepath.Rel(cwd, path); err == nil {
+				rel = r
+			}
+			logger.Info("restart", "path", rel)
 			runner.restart()
 		})
 	})
@@ -95,7 +110,7 @@ func (r *proxyRunner) buildAndStartLocked() error {
 		close(r.done)
 	}()
 
-	r.logger.Info("proxy started", "pid", cmd.Process.Pid)
+	r.logger.Info("proxy", "pid", cmd.Process.Pid)
 	return nil
 }
 

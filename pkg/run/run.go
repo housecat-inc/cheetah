@@ -15,27 +15,38 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/lmittmann/tint"
+
 	"github.com/housecat-inc/spacecat/pkg/api"
 	"github.com/housecat-inc/spacecat/pkg/db"
 	"github.com/housecat-inc/spacecat/pkg/watch"
 )
 
-const defaultSpacecatURL = "http://localhost:50000"
+const defaultSpacecatURL = "http://spacecat.localhost:50000"
 
 // Run registers with the spacecat dashboard, watches for file changes,
 // and manages a blue/green build/run cycle. It blocks until interrupted.
 func Run() {
-	logger := slog.Default()
-
 	spacecatURL := envOr("SPACECAT_URL", defaultSpacecatURL)
 	space, err := determineSpace()
 	if err != nil {
-		logger.Error("failed to determine space", "error", err)
+		slog.Error("failed to determine space", "error", err)
 		os.Exit(1)
 	}
 
+	logger := slog.New(tint.NewHandler(os.Stderr, &tint.Options{
+		Level:      slog.LevelInfo,
+		TimeFormat: time.Kitchen,
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.LevelKey {
+				return tint.Attr(6, slog.String(slog.LevelKey, "RUN")) // cyan RUN label
+			}
+			return a
+		},
+	})).With("space", space)
+	slog.SetDefault(logger)
+
 	dir, _ := os.Getwd()
-	logger.Info("registering with spacecat", "space", space, "url", spacecatURL, "dir", dir)
 	resp, err := register(spacecatURL, api.RegisterRequest{
 		Space:         space,
 		Dir:           dir,
@@ -46,11 +57,7 @@ func Run() {
 		logger.Error("failed to register", "error", err)
 		os.Exit(1)
 	}
-	logger.Info("registered",
-		"blue_port", resp.BluePort,
-		"green_port", resp.GreenPort,
-		"database_url", resp.DatabaseURL,
-	)
+	logger.Info("register", "port1", resp.Port1, "port2", resp.Port2)
 
 	runner := &appRunner{
 		spacecatURL: spacecatURL,
@@ -89,7 +96,6 @@ func Run() {
 
 	// File watcher
 	w := watch.New(dir, []string{"*.go", "go.mod", "*.sql"}, nil, func(path string) {
-		logger.Info("file changed, rebuilding", "path", path)
 		runner.rebuild(path)
 	})
 	w.Start()
@@ -118,9 +124,9 @@ type appRunner struct {
 
 func (r *appRunner) portForColor(color string) int {
 	if color == "green" {
-		return r.resp.GreenPort
+		return r.resp.Port2
 	}
-	return r.resp.BluePort
+	return r.resp.Port1
 }
 
 // buildAndStart builds the binary and starts it on the given color's port.
@@ -140,7 +146,6 @@ func (r *appRunner) buildAndStart(color string) error {
 	build.Stderr = os.Stderr
 	build.Env = append(os.Environ(),
 		fmt.Sprintf("DATABASE_URL=%s", r.resp.DatabaseURL),
-		fmt.Sprintf("DATABASE_TEMPLATE_URL=%s", r.resp.TemplateDBURL),
 	)
 	if err := build.Run(); err != nil {
 		return fmt.Errorf("build: %w", err)
@@ -153,7 +158,6 @@ func (r *appRunner) buildAndStart(color string) error {
 	cmd.Env = append(os.Environ(),
 		fmt.Sprintf("PORT=%d", port),
 		fmt.Sprintf("DATABASE_URL=%s", r.resp.DatabaseURL),
-		fmt.Sprintf("DATABASE_TEMPLATE_URL=%s", r.resp.TemplateDBURL),
 		fmt.Sprintf("SPACE=%s", r.space),
 	)
 	if err := cmd.Start(); err != nil {
@@ -166,7 +170,7 @@ func (r *appRunner) buildAndStart(color string) error {
 		r.blueCmd = cmd
 	}
 
-	r.logger.Info("app started", "port", port, "color", color, "pid", cmd.Process.Pid)
+	r.logger.Info("server", "port", port, "pid", cmd.Process.Pid)
 	return nil
 }
 
@@ -177,9 +181,15 @@ func (r *appRunner) buildAndStart(color string) error {
 // 4. Swap activeColor (proxy switches)
 // 5. Stop the old process
 func (r *appRunner) rebuild(changedPath string) {
+	if cwd, err := os.Getwd(); err == nil {
+		if rel, err := filepath.Rel(cwd, changedPath); err == nil {
+			changedPath = rel
+		}
+	}
+	r.logger.Info("builder")
+
 	// Pre-build hooks
 	if filepath.Base(changedPath) == "go.mod" {
-		r.logger.Info("go.mod changed, running go mod tidy")
 		tidy := exec.Command("go", "mod", "tidy")
 		tidy.Stdout = os.Stdout
 		tidy.Stderr = os.Stderr
@@ -191,7 +201,7 @@ func (r *appRunner) rebuild(changedPath string) {
 	}
 
 	if strings.HasSuffix(changedPath, ".sql") {
-		r.logger.Info("sql changed, rebuilding database", "path", changedPath)
+		r.logger.Info("migrator", "path", changedPath)
 		if err := r.ensureDatabase(); err != nil {
 			r.logger.Error("database rebuild failed", "error", err)
 			r.sendLog("error", fmt.Sprintf("database rebuild failed: %v", err))
@@ -215,20 +225,18 @@ func (r *appRunner) rebuild(changedPath string) {
 	}
 	r.mu.Unlock()
 
-	r.logger.Info("blue/green deploy", "old", oldColor, "new", newColor)
-
 	// Build + start new
 	if err := r.buildAndStart(newColor); err != nil {
-		r.logger.Error("rebuild failed", "error", err)
-		r.sendLog("error", fmt.Sprintf("rebuild failed: %v", err))
+		r.logger.Error("build failed", "error", err)
+		r.sendLog("error", fmt.Sprintf("build failed: %v", err))
 		return
 	}
 
 	// Wait for new to be healthy
 	newPort := r.portForColor(newColor)
 	if !r.waitForHealthy(newPort) {
-		r.logger.Error("new process failed health check, aborting swap")
-		r.sendLog("error", "new process failed health check")
+		r.logger.Error("health check failed, aborting swap")
+		r.sendLog("error", "health check failed")
 		r.stopColor(newColor)
 		return
 	}
@@ -238,7 +246,6 @@ func (r *appRunner) rebuild(changedPath string) {
 	r.activeColor = newColor
 	r.mu.Unlock()
 	r.updateHealth("healthy")
-	r.logger.Info("swapped", "active", newColor, "port", newPort)
 
 	// Stop old
 	r.stopColor(oldColor)
@@ -321,7 +328,7 @@ func (r *appRunner) ensureDatabase() error {
 		return fmt.Errorf("clone db: %w", err)
 	}
 
-	r.logger.Info("database ready", "template", tmplName, "database", appDBName)
+	r.logger.Info("database", "template", tmplName, "database_url", r.resp.DatabaseURL)
 	return nil
 }
 
@@ -352,7 +359,7 @@ func (r *appRunner) updateHealth(status string) {
 		"status":       status,
 		"active_color": color,
 	})
-	url := fmt.Sprintf("%s/_spaces/api/apps/%s/health", r.spacecatURL, r.space)
+	url := fmt.Sprintf("%s/api/apps/%s/health", r.spacecatURL, r.space)
 	req, _ := http.NewRequest(http.MethodPut, url, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	http.DefaultClient.Do(req)
@@ -365,7 +372,7 @@ func (r *appRunner) sendLog(level, message string) {
 		Message:   message,
 	}}
 	body, _ := json.Marshal(entries)
-	url := fmt.Sprintf("%s/_spaces/api/apps/%s/logs", r.spacecatURL, r.space)
+	url := fmt.Sprintf("%s/api/apps/%s/logs", r.spacecatURL, r.space)
 	http.Post(url, "application/json", bytes.NewReader(body))
 }
 
@@ -392,7 +399,7 @@ func register(spacecatURL string, req api.RegisterRequest) (*api.RegisterRespons
 	if err != nil {
 		return nil, err
 	}
-	resp, err := http.Post(spacecatURL+"/_spaces/api/apps", "application/json", bytes.NewReader(body))
+	resp, err := http.Post(spacecatURL+"/api/apps", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -408,7 +415,7 @@ func register(spacecatURL string, req api.RegisterRequest) (*api.RegisterRespons
 }
 
 func deregister(spacecatURL, space string) {
-	req, _ := http.NewRequest(http.MethodDelete, spacecatURL+"/_spaces/api/apps/"+space, nil)
+	req, _ := http.NewRequest(http.MethodDelete, spacecatURL+"/api/apps/"+space, nil)
 	http.DefaultClient.Do(req)
 }
 

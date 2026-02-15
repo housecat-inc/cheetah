@@ -51,7 +51,7 @@ func New(dir string, patterns, ignorePatterns []string, onChange func(path strin
 
 func (w *Watcher) Start() {
 	w.modTimes = w.scan()
-	w.logger.Info("watcher started", "dir", w.dir, "files", len(w.modTimes))
+	w.logger.Info("watch", "dir", w.dir, "files", len(w.modTimes))
 
 	w.stopWaitGroup.Add(1)
 	go func() {
@@ -67,7 +67,6 @@ func (w *Watcher) Start() {
 			}
 
 			if dirtyPath := w.tryToFindDirtyPath(); dirtyPath != "" {
-				w.logger.Info("change detected", "path", dirtyPath)
 				w.onChange(dirtyPath)
 			}
 		}
