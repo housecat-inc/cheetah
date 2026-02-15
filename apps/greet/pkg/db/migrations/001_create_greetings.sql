@@ -1,9 +1,10 @@
 -- +goose Up
 CREATE TABLE greetings (
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    emoji TEXT NOT NULL DEFAULT '❤️',
     id SERIAL PRIMARY KEY,
-    name TEXT NOT NULL,
     message TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    name TEXT NOT NULL
 );
 
 -- +goose Down

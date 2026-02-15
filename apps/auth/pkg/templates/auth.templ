@@ -1,0 +1,46 @@
+package templates
+
+templ Login() {
+	<!DOCTYPE html>
+	<html>
+		<head>
+			<meta charset="utf-8"/>
+			<title>Auth</title>
+			<style>
+				body { font-family: system-ui, sans-serif; max-width: 600px; margin: 4rem auto; padding: 0 1rem; text-align: center; }
+				a.btn { display: inline-block; padding: 0.8rem 1.5rem; background: #4285f4; color: white; border-radius: 4px; text-decoration: none; font-size: 1rem; }
+				a.btn:hover { background: #3367d6; }
+			</style>
+		</head>
+		<body>
+			<h1>Sign In</h1>
+			<p>
+				<a class="btn" href="/login" role="button">Sign in with Google</a>
+			</p>
+		</body>
+	</html>
+}
+
+templ Profile(email, name, picture string) {
+	<!DOCTYPE html>
+	<html>
+		<head>
+			<meta charset="utf-8"/>
+			<title>Profile</title>
+			<style>
+				body { font-family: system-ui, sans-serif; max-width: 600px; margin: 4rem auto; padding: 0 1rem; text-align: center; }
+				img { border-radius: 50%; width: 96px; height: 96px; }
+				a { color: #4285f4; }
+			</style>
+		</head>
+		<body>
+			<h1>Profile</h1>
+			if picture != "" {
+				<img src={ picture } alt={ name }/>
+			}
+			<h2>{ name }</h2>
+			<p>{ email }</p>
+			<p><a href="/logout">Sign out</a></p>
+		</body>
+	</html>
+}

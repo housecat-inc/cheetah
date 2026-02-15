@@ -5,6 +5,8 @@ package watch
 // CPU usage against change detection latency.
 
 import (
+	"bytes"
+	"io"
 	"log/slog"
 	"math/rand"
 	"os"
@@ -44,13 +46,13 @@ func New(dir string, patterns, ignorePatterns []string, onChange func(path strin
 		dir:            dir,
 		patterns:       patterns,
 		ignorePatterns: ignorePatterns,
-		onChange:        onChange,
+		onChange:       onChange,
 		logger:         slog.Default(),
 	}
 }
 
 func (w *Watcher) Start() {
-	w.modTimes = w.scan()
+	w.modTimes = w.Scan()
 	w.logger.Info("watch", "dir", w.dir, "files", len(w.modTimes))
 
 	w.stopWaitGroup.Add(1)
@@ -62,7 +64,7 @@ func (w *Watcher) Start() {
 
 			rescanCounter++
 			if rescanCounter >= rescanInterval {
-				w.refreshFileList()
+				w.RefreshFileList()
 				rescanCounter = 0
 			}
 
@@ -78,7 +80,7 @@ func (w *Watcher) Stop() {
 	w.stopWaitGroup.Wait()
 }
 
-func (w *Watcher) scan() map[string]time.Time {
+func (w *Watcher) Scan() map[string]time.Time {
 	result := make(map[string]time.Time)
 	filepath.WalkDir(w.dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -89,16 +91,19 @@ func (w *Watcher) scan() map[string]time.Time {
 			if strings.HasPrefix(name, ".") || name == "node_modules" || name == "vendor" {
 				return filepath.SkipDir
 			}
-			if matchesAny(name, w.ignorePatterns) {
+			if MatchesAny(name, w.ignorePatterns) {
 				return filepath.SkipDir
 			}
 			return nil
 		}
 		relPath, _ := filepath.Rel(w.dir, path)
-		if len(w.patterns) > 0 && !matchesAny(relPath, w.patterns) {
+		if len(w.patterns) > 0 && !MatchesAny(relPath, w.patterns) {
 			return nil
 		}
-		if matchesAny(relPath, w.ignorePatterns) {
+		if MatchesAny(relPath, w.ignorePatterns) {
+			return nil
+		}
+		if hasDoNotEdit(path) {
 			return nil
 		}
 		info, err := d.Info()
@@ -111,11 +116,11 @@ func (w *Watcher) scan() map[string]time.Time {
 	return result
 }
 
-func (w *Watcher) refreshFileList() {
+func (w *Watcher) RefreshFileList() {
 	w.mutex.Lock()
 	defer w.mutex.Unlock()
 
-	fresh := w.scan()
+	fresh := w.Scan()
 
 	// Remove deleted files
 	for path := range w.modTimes {
@@ -201,7 +206,24 @@ func (w *Watcher) isDirty(path string) bool {
 	return false
 }
 
-func matchesAny(path string, patterns []string) bool {
+var doNotEditMarker = []byte("DO NOT EDIT")
+
+func hasDoNotEdit(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	buf := make([]byte, 1024)
+	n, err := io.ReadAtLeast(f, buf, 1)
+	if err != nil {
+		return false
+	}
+	return bytes.Contains(buf[:n], doNotEditMarker)
+}
+
+func MatchesAny(path string, patterns []string) bool {
 	name := filepath.Base(path)
 	for _, pattern := range patterns {
 		if matched, _ := filepath.Match(pattern, name); matched {

@@ -1,2 +1,5 @@
+.envrc
 TODO.md
-.spacecat/
+.cheetah/
+_artifacts/
+*_templ.go

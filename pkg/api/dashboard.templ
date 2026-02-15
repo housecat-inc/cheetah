@@ -1,0 +1,107 @@
+package api
+
+import "fmt"
+
+templ Dashboard(port int, status Status) {
+	<!DOCTYPE html>
+	<html>
+		<head>
+			<title>Cheetah Dashboard</title>
+			<meta charset="utf-8"/>
+			<style>
+				body { font-family: system-ui, sans-serif; margin: 2rem; background: #0a0a0a; color: #e0e0e0; }
+				h1 { color: #f0f0f0; }
+				.status { background: #1a1a2e; padding: 1rem; border-radius: 8px; margin-bottom: 2rem; }
+				.status span { margin-right: 2rem; }
+				.dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; }
+				.dot.on { background: #4ade80; }
+				.dot.off { background: #ef4444; }
+				table { width: 100%; border-collapse: collapse; }
+				th, td { text-align: left; padding: 0.5rem 1rem; border-bottom: 1px solid #2a2a3e; }
+				th { color: #888; font-weight: 500; font-size: 0.85rem; text-transform: uppercase; }
+				tr:hover { background: #1a1a2e; }
+				.active-port { color: #4ade80; font-weight: 600; }
+				a { color: #7dd3fc; text-decoration: none; }
+				a:hover { text-decoration: underline; }
+				code { background: #1a1a2e; padding: 2px 6px; border-radius: 4px; font-size: 0.85rem; }
+				.empty { text-align: center; padding: 3rem; color: #666; }
+			</style>
+		</head>
+		<body>
+			<h1>Cheetah</h1>
+			<div class="status" id="status-bar">
+				<span>
+					if status.PostgresRunning {
+						<span class="dot on"></span>
+					} else {
+						<span class="dot off"></span>
+					}
+					Postgres :{ fmt.Sprint(status.PostgresPort) }
+				</span>
+				<span>Apps: <span id="app-count">{ fmt.Sprint(status.AppCount) }</span></span>
+			</div>
+			<div id="app-table"></div>
+			@templ.Raw(dashboardJS)
+			<script src="/spaces.js" data-space="cheetah" data-port={ fmt.Sprint(port) }></script>
+		</body>
+	</html>
+}
+
+const dashboardJS = `<script>
+(function() {
+  const table = document.getElementById("app-table");
+  const countEl = document.getElementById("app-count");
+  let apps = {};
+
+  function render() {
+    const list = Object.values(apps);
+    countEl.textContent = list.length;
+    if (list.length === 0) {
+      table.innerHTML = '<div class="empty">No apps registered. Run <code>go run main.go</code> in a child app to register.</div>';
+      return;
+    }
+    let h = '<table><thead><tr>' +
+      '<th>Space</th><th>Config</th>' +
+      '<th>Blue</th><th>Green</th>' +
+      '<th>Health</th><th>Watch</th><th>Logs</th></tr></thead><tbody>';
+    for (const a of list) {
+      const watch = (a.watch.match || []).map(p => '<code>' + p + '</code>').join(' ');
+      const p1cls = a.ports.active === a.ports.blue ? ' class="active-port"' : '';
+      const p2cls = a.ports.active === a.ports.green ? ' class="active-port"' : '';
+      h += '<tr>' +
+        '<td><strong><a href="' + location.protocol + '//' + a.space + '.localhost:' + location.port + '/">' + a.space + '</a></strong></td>' +
+        '<td>' + (a.config || []).map(c => '<code>' + c + '</code>').join(' ') + '</td>' +
+        '<td' + p1cls + '>:' + a.ports.blue + '</td>' +
+        '<td' + p2cls + '>:' + a.ports.green + '</td>' +
+        '<td>' + (a.health && a.health.status || '') + '</td>' +
+        '<td>' + watch + '</td>' +
+        '<td>' + (a.logs || []).length + '</td></tr>';
+    }
+    h += '</tbody></table>';
+    table.innerHTML = h;
+  }
+
+  const es = new EventSource("/api/events");
+
+  es.addEventListener("init", function(e) {
+    const list = JSON.parse(e.data);
+    apps = {};
+    for (const a of list) apps[a.space] = a;
+    render();
+  });
+
+  es.addEventListener("app", function(e) {
+    const a = JSON.parse(e.data);
+    apps[a.space] = a;
+    render();
+  });
+
+  es.addEventListener("deregister", function(e) {
+    const data = JSON.parse(e.data);
+    delete apps[data.space];
+    render();
+  });
+
+  render();
+})();
+</script>`

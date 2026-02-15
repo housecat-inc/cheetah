@@ -1,35 +1,38 @@
-# Spacecat
+# Cheetah
 
-Spacecat is a utility to manage developing many versions of many apps at once.
+When agentic coding a fast dev/test/build/run cycle is a super power for iterating on many ideas at once.
+
+Cheetah provides a drop-in harness for developing many apps / worktrees at once with fast server rebuilds, database provisioning and error feedback.
 
 ## Quick Start
 
-Add a spacecat `main.go` to your app. Now you, your team, and/or your agents can run `go run main.go` to develop many copies of the app at once.
+Add a `main.go` with `cheetah.Run()` to your app. Now you, your team, and your agents can run `go run main.go` to develop many copies of the app in parallel.
 
-Spacecat coordinates a single multi-tenant HTTP proxy and Postgres database for all environments.
+Cheetah coordinates a single multi-tenant HTTP proxy and Postgres database for all environments.
 
-- `SPACE`: friendly name like `little-rock` or derived branch name `nzoschke-add-notes`
-- `PORT`: one of two ports to bind to for running the dev app with the "blue / green" pattern
-- `DATABASE_TEMPLATE_URL`: database with migrations applied `postgres://localhost:54320/t_abc123`
-- `DATABASE_URL`: copy of template database for the space `postgres://localhost:54320/little-rock`
+- `SPACE`: unique friendly name, e.g. `little-rock` or worktree branch derived `nzoschke-add-notes`
+- `PORT`: one of two ports to bind to for "blue / green deployment" pattern
+- `DATABASE_TEMPLATE_URL`: database with migrations pre-applied e.g. `postgres://localhost:54320/t_abc123`
+- `DATABASE_URL`: copy of template database for the space, e.g. `postgres://localhost:54320/little-rock`
 
-Conventions over configuration:
+Cheetah works with apps that follow twelve-factor conventions:
 
-- code: `$SPACE` or worktree branch name
+- code: `$SPACE` and git worktree dir with branch name
 - dependency manifest: `go.mod`
-- config: `.envrc`
-- backing services: multi-tenant postgres, `find sqlc.yaml`, `goose`, and `$DATABASE_URL`
+- config: `.envrc` and `direnv`
+- backing services: multi-tenant postgres; detect `sqlc.yaml schema`, migrate a template database once, then create many `$DATABASE_URL` for dev and test envs
 - build: watch files; ignore `.gitignore`, `DO NOT EDIT` comment; run `go generate`, `go build cmd/app`
-- port: `$PORT` and `$PROXY_PORT` with blue/green router and OAuth bouncer
+- port: `$PORT` with blue/green deploys and OAuth bouncer
 - disposability: `/health` endpoint
-- logs: `slog`
-- admin processes: `go test`, `go run ./cmd/app db migrate`
+- logs: `slog` with error monitoring
+- admin processes: `go test`
 
 ## Development
 
-Run `go run main.go` to run the proxy in development mode with live reload.
+Run `go run main.go` to run cheetah in development mode with live reload. Run `go test -v ./... -artifacts artifacts` to verify.
 
 ## Roadmap
 
-- [ ] Internet gateway
 - [ ] Remote, shared, encrypted config
+- [ ] Internet gateway
+- [ ] Test runner with short, parallel, and error callback optimizations

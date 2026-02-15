@@ -9,9 +9,9 @@ import (
 )
 
 type Greeting struct {
-	ID        int32
-	Name      string
-	Message   string
 	CreatedAt time.Time
 	Emoji     string
+	ID        int32
+	Message   string
+	Name      string
 }
