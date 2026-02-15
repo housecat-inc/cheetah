@@ -30,12 +30,7 @@ func main() {
 
 	port := os.Getenv("PORT")
 
-	cheetahURL := os.Getenv("CHEETAH_URL")
-	if cheetahURL == "" {
-		cheetahURL = "http://cheetah.localhost:50000"
-	}
-	u, _ := url.Parse(cheetahURL)
-	redirectURL := fmt.Sprintf("http://localhost:%s/auth/callback", u.Port())
+	redirectURL := fmt.Sprintf("http://localhost:50000/auth/callback")
 
 	oauthCfg := &oauth2.Config{
 		ClientID:     os.Getenv("GOOGLE_CLIENT_ID"),

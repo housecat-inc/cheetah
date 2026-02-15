@@ -2,3 +2,4 @@
 TODO.md
 .cheetah/
 _artifacts/
+*_templ.go
