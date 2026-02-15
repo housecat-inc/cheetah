@@ -15,10 +15,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cockroachdb/errors"
 	"github.com/lmittmann/tint"
 
 	"github.com/housecat-inc/spacecat/pkg/api"
 	"github.com/housecat-inc/spacecat/pkg/db"
+	"github.com/housecat-inc/spacecat/pkg/space"
 	"github.com/housecat-inc/spacecat/pkg/watch"
 )
 
@@ -28,7 +30,7 @@ const defaultSpacecatURL = "http://spacecat.localhost:50000"
 // and manages a blue/green build/run cycle. It blocks until interrupted.
 func Run() {
 	spacecatURL := envOr("SPACECAT_URL", defaultSpacecatURL)
-	space, err := determineSpace()
+	sp, err := space.Default()
 	if err != nil {
 		slog.Error("failed to determine space", "error", err)
 		os.Exit(1)
@@ -43,13 +45,12 @@ func Run() {
 			}
 			return a
 		},
-	})).With("space", space)
+	})).With("space", sp.Name)
 	slog.SetDefault(logger)
 
-	dir, _ := os.Getwd()
 	resp, err := register(spacecatURL, api.RegisterRequest{
-		Space:         space,
-		Dir:           dir,
+		Space:         sp.Name,
+		Dir:           sp.Dir,
 		ConfigFile:    ".envrc",
 		WatchPatterns: []string{"*.go", "go.mod", "*.sql"},
 	})
@@ -60,8 +61,9 @@ func Run() {
 	logger.Info("register", "port1", resp.Port1, "port2", resp.Port2)
 
 	runner := &appRunner{
+		dir:         sp.Dir,
 		spacecatURL: spacecatURL,
-		space:       space,
+		space:       sp.Name,
 		resp:        resp,
 		activeColor: "blue",
 		logger:      logger,
@@ -95,7 +97,7 @@ func Run() {
 	runner.updateHealth("healthy")
 
 	// File watcher
-	w := watch.New(dir, []string{"*.go", "go.mod", "*.sql"}, nil, func(path string) {
+	w := watch.New(sp.Dir, []string{"*.go", "go.mod", "*.sql"}, nil, func(path string) {
 		runner.rebuild(path)
 	})
 	w.Start()
@@ -108,18 +110,19 @@ func Run() {
 	logger.Info("shutting down")
 	w.Stop()
 	runner.stopAll()
-	deregister(spacecatURL, space)
+	deregister(spacecatURL, sp.Name)
 }
 
 type appRunner struct {
-	spacecatURL string
-	space       string
-	resp        *api.RegisterResponse
 	activeColor string
 	blueCmd     *exec.Cmd
+	dir         string
 	greenCmd    *exec.Cmd
-	mu          sync.Mutex
 	logger      *slog.Logger
+	mu          sync.Mutex
+	resp        *api.RegisterResponse
+	space       string
+	spacecatURL string
 }
 
 func (r *appRunner) portForColor(color string) int {
@@ -148,7 +151,7 @@ func (r *appRunner) buildAndStart(color string) error {
 		fmt.Sprintf("DATABASE_URL=%s", r.resp.DatabaseURL),
 	)
 	if err := build.Run(); err != nil {
-		return fmt.Errorf("build: %w", err)
+		return errors.Wrap(err, "build")
 	}
 
 	// Run
@@ -161,7 +164,7 @@ func (r *appRunner) buildAndStart(color string) error {
 		fmt.Sprintf("SPACE=%s", r.space),
 	)
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("run: %w", err)
+		return errors.Wrap(err, "run")
 	}
 
 	if color == "green" {
@@ -181,10 +184,8 @@ func (r *appRunner) buildAndStart(color string) error {
 // 4. Swap activeColor (proxy switches)
 // 5. Stop the old process
 func (r *appRunner) rebuild(changedPath string) {
-	if cwd, err := os.Getwd(); err == nil {
-		if rel, err := filepath.Rel(cwd, changedPath); err == nil {
-			changedPath = rel
-		}
+	if rel, err := filepath.Rel(r.dir, changedPath); err == nil {
+		changedPath = rel
 	}
 	r.logger.Info("builder")
 
@@ -306,26 +307,26 @@ func (r *appRunner) ensureDatabase() error {
 
 	hash, err := db.HashMigrations(migDir)
 	if err != nil {
-		return fmt.Errorf("hash migrations: %w", err)
+		return errors.Wrap(err, "hash migrations")
 	}
 
 	adminURL, err := db.AdminURL(r.resp.DatabaseURL)
 	if err != nil {
-		return fmt.Errorf("admin url: %w", err)
+		return errors.Wrap(err, "admin url")
 	}
 
 	tmplName, err := db.EnsureTemplate(adminURL, migDir, hash)
 	if err != nil {
-		return fmt.Errorf("ensure template: %w", err)
+		return errors.Wrap(err, "ensure template")
 	}
 
 	appDBName, err := db.DBNameFromURL(r.resp.DatabaseURL)
 	if err != nil {
-		return fmt.Errorf("db name: %w", err)
+		return errors.Wrap(err, "db name")
 	}
 
 	if err := db.CloneDB(adminURL, tmplName, appDBName); err != nil {
-		return fmt.Errorf("clone db: %w", err)
+		return errors.Wrap(err, "clone db")
 	}
 
 	r.logger.Info("database", "template", tmplName, "database_url", r.resp.DatabaseURL)
@@ -376,24 +377,6 @@ func (r *appRunner) sendLog(level, message string) {
 	http.Post(url, "application/json", bytes.NewReader(body))
 }
 
-// Helpers
-
-func determineSpace() (string, error) {
-	if space := os.Getenv("SPACE"); space != "" {
-		return space, nil
-	}
-	if space := os.Getenv("CONDUCTOR_WORKSPACE_NAME"); space != "" {
-		return space, nil
-	}
-	out, err := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD").Output()
-	if err != nil {
-		return "", fmt.Errorf("set SPACE or CONDUCTOR_WORKSPACE_NAME env var, or run in a git repo")
-	}
-	branch := strings.TrimSpace(string(out))
-	branch = strings.ReplaceAll(branch, "/", "-")
-	return branch, nil
-}
-
 func register(spacecatURL string, req api.RegisterRequest) (*api.RegisterResponse, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -405,7 +388,7 @@ func register(spacecatURL string, req api.RegisterRequest) (*api.RegisterRespons
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("register failed: %s", resp.Status)
+		return nil, errors.Newf("register failed: %s", resp.Status)
 	}
 	var result api.RegisterResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {

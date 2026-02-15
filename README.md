@@ -15,7 +15,7 @@ Spacecat coordinates a single multi-tenant HTTP proxy and Postgres database for 
 
 Conventions over configuration:
 
-- code: `$SPACE` or worktree branch name
+- code: `$SPACE` or git worktree dir with branch name
 - dependency manifest: `go.mod`
 - config: `.envrc`
 - backing services: multi-tenant postgres, `find sqlc.yaml`, `goose`, and `$DATABASE_URL`
