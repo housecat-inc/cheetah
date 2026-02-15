@@ -14,7 +14,7 @@ import (
 	"github.com/cockroachdb/errors"
 	embeddedpostgres "github.com/fergusstrange/embedded-postgres"
 
-	"github.com/housecat-inc/spacecat/pkg/config"
+	"github.com/housecat-inc/cheetah/pkg/config"
 )
 
 const startTimeout = 30 * time.Second
@@ -122,7 +122,7 @@ func dir() string {
 		home = os.TempDir()
 	}
 
-	dir := filepath.Join(home, ".spacecat")
+	dir := filepath.Join(home, ".cheetah")
 	os.MkdirAll(dir, 0o755)
 	return dir
 }

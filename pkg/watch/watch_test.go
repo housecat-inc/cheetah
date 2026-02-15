@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/housecat-inc/spacecat/pkg/watch"
+	"github.com/housecat-inc/cheetah/pkg/watch"
 )
 
 func TestMatchesAny(t *testing.T) {

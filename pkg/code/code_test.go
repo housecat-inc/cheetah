@@ -5,7 +5,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/housecat-inc/spacecat/pkg/code"
+	"github.com/housecat-inc/cheetah/pkg/code"
 )
 
 func TestCode(t *testing.T) {

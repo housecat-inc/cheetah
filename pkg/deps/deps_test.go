@@ -5,7 +5,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/housecat-inc/spacecat/pkg/deps"
+	"github.com/housecat-inc/cheetah/pkg/deps"
 )
 
 func TestSync(t *testing.T) {

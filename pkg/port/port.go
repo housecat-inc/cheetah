@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/housecat-inc/spacecat/pkg/api"
+	"github.com/housecat-inc/cheetah/pkg/api"
 )
 
 type Config struct {

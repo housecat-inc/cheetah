@@ -1,3 +1,5 @@
+//go:build ignore
+
 package main
 
 import (
@@ -13,7 +15,8 @@ import (
 	"github.com/cockroachdb/errors"
 	"github.com/lmittmann/tint"
 
-	"github.com/housecat-inc/spacecat/pkg/watch"
+	"github.com/housecat-inc/cheetah/pkg/build"
+	"github.com/housecat-inc/cheetah/pkg/watch"
 )
 
 func main() {
@@ -35,14 +38,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Watch spacecat source files, ignoring child apps
+	// Watch cheetah source files, ignoring child apps
 	cwd, _ := os.Getwd()
 	var (
 		restartTimer *time.Timer
 		timerMu      sync.Mutex
 	)
 
-	w := watch.New(cwd, []string{"*.go"}, []string{"apps"}, func(path string) {
+	w := watch.New(cwd, []string{"*.go", "*.templ"}, []string{"apps"}, func(path string) {
 		timerMu.Lock()
 		defer timerMu.Unlock()
 		if restartTimer != nil {
@@ -69,7 +72,7 @@ func main() {
 	logger.Info("shutdown complete")
 }
 
-var binPath = filepath.Join(".spacecat", "spacecat")
+var binPath = filepath.Join(".cheetah", "cheetah")
 
 type proxyRunner struct {
 	logger *slog.Logger
@@ -85,14 +88,16 @@ func (r *proxyRunner) start() error {
 }
 
 func (r *proxyRunner) buildAndStartLocked() error {
-	os.MkdirAll(".spacecat", 0o755)
+	os.MkdirAll(".cheetah", 0o755)
 
-	// Build the binary directly — avoids the go run wrapper process
-	// which doesn't forward signals to its child
-	build := exec.Command("go", "build", "-o", binPath, "./cmd/spacecat")
-	build.Stdout = os.Stdout
-	build.Stderr = os.Stderr
-	if err := build.Run(); err != nil {
+	if err := build.Generate(); err != nil {
+		return err
+	}
+
+	b := exec.Command("go", "build", "-o", binPath, "./cmd/cheetah")
+	b.Stdout = os.Stdout
+	b.Stderr = os.Stderr
+	if err := b.Run(); err != nil {
 		return errors.Wrap(err, "build")
 	}
 

@@ -72,34 +72,52 @@ func Load(env Env, dir string, defaults ...map[string]string) Out {
 		defs = defaults[0]
 	}
 
-	candidates := []string{".envrc"}
-	if defs != nil {
-		candidates = append(candidates, "main.go")
-	}
-	candidates = append(candidates, ".envrc.example")
+	vars := map[string]string{}
+	var providers []string
 
-	var strategies []string
-	for _, f := range candidates {
-		if _, err := env.Stat(filepath.Join(dir, f)); err == nil {
-			strategies = append(strategies, f)
+	if data, err := env.ReadFile(filepath.Join(dir, ".envrc.example")); err == nil {
+		contributed := false
+		for k, v := range ParseExample(data) {
+			if defs != nil {
+				if _, ok := defs[k]; !ok {
+					continue
+				}
+			}
+			vars[k] = v
+			if v != "" {
+				contributed = true
+			}
+		}
+		if contributed {
+			providers = append(providers, ".envrc.example")
 		}
 	}
 
-	vars := make(map[string]string, len(defs))
-
-	if data, err := env.ReadFile(filepath.Join(dir, ".envrc.example")); err == nil {
-		for k, v := range ParseExample(data) {
-			if _, ok := defs[k]; ok {
+	if defs != nil {
+		contributed := false
+		for k, v := range defs {
+			if v != "" {
+				vars[k] = v
+				contributed = true
+			} else if _, ok := vars[k]; !ok {
 				vars[k] = v
 			}
 		}
+		if _, err := env.Stat(filepath.Join(dir, "main.go")); err == nil && contributed {
+			providers = append(providers, "main.go")
+		}
 	}
 
-	for k, v := range defs {
-		if v != "" {
+	if data, err := env.ReadFile(filepath.Join(dir, ".envrc")); err == nil {
+		contributed := false
+		for k, v := range ParseExample(data) {
 			vars[k] = v
-		} else if _, ok := vars[k]; !ok {
-			vars[k] = v
+			if v != "" {
+				contributed = true
+			}
+		}
+		if contributed {
+			providers = append(providers, ".envrc")
 		}
 	}
 
@@ -111,7 +129,7 @@ func Load(env Env, dir string, defaults ...map[string]string) Out {
 
 	return Out{
 		Env:       vars,
-		Providers: strategies,
+		Providers: providers,
 	}
 }
 

@@ -12,7 +12,8 @@ import (
 	_ "github.com/lib/pq"
 	"github.com/lmittmann/tint"
 
-	"github.com/housecat-inc/spacecat/apps/greet/internal/db"
+	"github.com/housecat-inc/cheetah/apps/greet/pkg/db"
+	"github.com/housecat-inc/cheetah/apps/greet/pkg/templates"
 )
 
 func main() {
@@ -42,45 +43,16 @@ func main() {
 			name = "world"
 		}
 
-		var greetingsHTML string
+		var greetings []db.Greeting
 		if queries != nil {
-			greetings, err := queries.ListGreetings(r.Context())
-			if err == nil {
-				for _, g := range greetings {
-					greetingsHTML += fmt.Sprintf(
-						`<li>%s <strong>%s</strong>: %s <small>(%s)</small></li>`,
-						g.Emoji, g.Name, g.Message, g.CreatedAt.Format("15:04:05"),
-					)
-				}
+			var err error
+			greetings, err = queries.ListGreetings(r.Context())
+			if err != nil {
+				slog.Error("failed to list greetings", "error", err)
 			}
 		}
 
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprintf(w, `<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>Greet</title>
-<style>
-  body { font-family: system-ui, sans-serif; max-width: 600px; margin: 2rem auto; padding: 0 1rem; }
-  form { display: flex; gap: 0.5rem; margin-bottom: 1.5rem; }
-  input { padding: 0.4rem 0.6rem; border: 1px solid #ccc; border-radius: 4px; }
-  input[name="emoji"] { width: 3rem; text-align: center; }
-  button { padding: 0.4rem 1rem; border-radius: 4px; border: 1px solid #ccc; cursor: pointer; }
-  ul { list-style: none; padding: 0; }
-  li { padding: 0.4rem 0; border-bottom: 1px solid #eee; }
-  small { color: #888; }
-</style>
-</head>
-<body>
-<h1>Hello, %s</h1>
-<h2>Leave a greeting</h2>
-<form method="POST" action="/greetings">
-  <input name="name" placeholder="Your name" required>
-  <input name="message" placeholder="Message" required>
-  <input name="emoji" placeholder="Emoji" value="&#x1F44B;">
-  <button type="submit">Send</button>
-</form>
-<h2>Recent greetings</h2>
-<ul>%s</ul>
-</body></html>`, name, greetingsHTML)
+		templates.Index(name, greetings).Render(r.Context(), w)
 	})
 
 	http.HandleFunc("/greetings", func(w http.ResponseWriter, r *http.Request) {

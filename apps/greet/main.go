@@ -1,11 +1,12 @@
 package main
 
-import "github.com/housecat-inc/spacecat/pkg/run"
+//go:generate templ generate
+//go:generate sqlc generate
+
+import "github.com/housecat-inc/cheetah"
 
 func main() {
-	run.Run(map[string]string{
-		"DATABASE_URL": "",
-		"PORT":         "8080",
-		"SPACE":        "",
+	cheetah.Run(map[string]string{
+		"PORT": "8080",
 	})
 }

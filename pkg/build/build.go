@@ -15,15 +15,30 @@ type In struct {
 	DatabaseURL string
 	Port        int
 	Space       string
+	CheetahURL string
 }
 
 type Out struct {
 	Cmd *exec.Cmd
 }
 
+func Generate() error {
+	gen := exec.Command("go", "generate", "./...")
+	gen.Stdout = os.Stdout
+	gen.Stderr = os.Stderr
+	if err := gen.Run(); err != nil {
+		return errors.Wrap(err, "generate")
+	}
+	return nil
+}
+
 func Run(in In) (Out, error) {
-	binPath := filepath.Join(".spacecat", "app")
-	os.MkdirAll(".spacecat", 0o755)
+	binPath := filepath.Join(".cheetah", "app")
+	os.MkdirAll(".cheetah", 0o755)
+
+	if err := Generate(); err != nil {
+		return Out{}, err
+	}
 
 	b := exec.Command("go", "build", "-o", binPath, "./cmd/app")
 	b.Stdout = os.Stdout
@@ -46,6 +61,7 @@ func Run(in In) (Out, error) {
 		fmt.Sprintf("DATABASE_URL=%s", in.DatabaseURL),
 		fmt.Sprintf("PORT=%d", in.Port),
 		fmt.Sprintf("SPACE=%s", in.Space),
+		fmt.Sprintf("CHEETAH_URL=%s", in.CheetahURL),
 	)
 	if err := cmd.Start(); err != nil {
 		return Out{}, errors.Wrap(err, "run")

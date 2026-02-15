@@ -1,10 +1,11 @@
 package api
 
+//go:generate templ generate
+
 import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"html/template"
 	"io"
 	"log/slog"
 	"net/http"
@@ -69,7 +70,7 @@ func (s *Server) Middleware(e *echo.Echo) {
 		LogStatus:   true,
 		LogURI:      true,
 		LogValuesFunc: func(c echo.Context, v middleware.RequestLoggerValues) error {
-			if extractSubdomain(c.Request().Host) == "spacecat" {
+			if extractSubdomain(c.Request().Host) == "cheetah" {
 				return nil
 			}
 			s.logger.Info("request",
@@ -82,7 +83,11 @@ func (s *Server) Middleware(e *echo.Echo) {
 	}))
 	e.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
-			if extractSubdomain(c.Request().Host) != "spacecat" {
+			sub := extractSubdomain(c.Request().Host)
+			if sub == "" && c.Request().URL.Path == "/auth/callback" {
+				return s.handleOAuthBounce(c)
+			}
+			if sub != "cheetah" {
 				return s.handleProxy(c)
 			}
 			return next(c)
@@ -229,7 +234,7 @@ func extractSubdomain(host string) string {
 }
 
 func (s *Server) targetForRequest(host string) (space string, port int, ok bool) {
-	if sub := extractSubdomain(host); sub != "" && sub != "spacecat" {
+	if sub := extractSubdomain(host); sub != "" && sub != "cheetah" {
 		s.mu.RLock()
 		app, exists := s.apps[sub]
 		s.mu.RUnlock()
@@ -397,12 +402,36 @@ func (s *Server) handleEventsStream(c echo.Context) error {
 	}
 }
 
+// OAuth bouncer
+
+func (s *Server) handleOAuthBounce(c echo.Context) error {
+	state := c.QueryParam("state")
+	space, appState, ok := strings.Cut(state, "|")
+	if !ok || space == "" {
+		return c.String(http.StatusBadRequest, "missing space in oauth state")
+	}
+
+	q := url.Values{}
+	for k, vs := range c.QueryParams() {
+		for _, v := range vs {
+			if k == "state" {
+				continue
+			}
+			q.Add(k, v)
+		}
+	}
+	q.Set("state", appState)
+
+	target := fmt.Sprintf("http://%s.localhost:%d/auth/callback?%s", space, s.config.DashboardPort, q.Encode())
+	return c.Redirect(http.StatusTemporaryRedirect, target)
+}
+
 // Reverse proxy
 
 func (s *Server) handleProxy(c echo.Context) error {
 	space, port, ok := s.targetForRequest(c.Request().Host)
 	if !ok {
-		return c.Redirect(http.StatusTemporaryRedirect, fmt.Sprintf("http://spacecat.localhost:%d/", s.config.DashboardPort))
+		return c.Redirect(http.StatusTemporaryRedirect, fmt.Sprintf("http://cheetah.localhost:%d/", s.config.DashboardPort))
 	}
 
 	target, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", port))
@@ -426,7 +455,7 @@ func (s *Server) handleProxy(c echo.Context) error {
 			injected := strings.Replace(
 				string(body),
 				"</body>",
-				fmt.Sprintf(`<script src="//spacecat.localhost:%d/spaces.js" data-space="%s" data-port="%d"></script>`+"\n</body>", s.config.DashboardPort, space, port),
+				fmt.Sprintf(`<script src="//cheetah.localhost:%d/spaces.js" data-space="%s" data-port="%d"></script>`+"\n</body>", s.config.DashboardPort, space, port),
 				1,
 			)
 			resp.Body = io.NopCloser(bytes.NewReader([]byte(injected)))
@@ -448,17 +477,17 @@ const spacesJS = `(function() {
   const initialPort = script?.getAttribute("data-port") || "";
 
   const el = document.createElement("div");
-  el.id = "__spacecat";
+  el.id = "__cheetah";
   el.innerHTML = '<span class="__sc-dot"></span> <span class="__sc-label"></span>';
   document.body.appendChild(el);
 
   const menu = document.createElement("div");
-  menu.id = "__spacecat-menu";
+  menu.id = "__cheetah-menu";
   document.body.appendChild(menu);
 
   const style = document.createElement("style");
   style.textContent = ` + "`" + `
-    #__spacecat {
+    #__cheetah {
       position: fixed; bottom: 12px; right: 12px; z-index: 2147483647;
       background: #1a1a2e; color: #e0e0e0; border: 1px solid #2a2a3e;
       border-radius: 20px; padding: 6px 14px; font: 12px/1 system-ui, sans-serif;
@@ -466,7 +495,7 @@ const spacesJS = `(function() {
       box-shadow: 0 2px 8px rgba(0,0,0,0.4); transition: opacity 0.2s;
       opacity: 0.85; user-select: none;
     }
-    #__spacecat:hover { opacity: 1; }
+    #__cheetah:hover { opacity: 1; }
     .__sc-dot {
       width: 8px; height: 8px; border-radius: 50%;
       background: #888; display: inline-block;
@@ -475,14 +504,14 @@ const spacesJS = `(function() {
     .__sc-dot.unhealthy { background: #ef4444; }
     .__sc-dot.unknown { background: #888; }
     .__sc-dot.building { background: #facc15; }
-    #__spacecat-menu {
+    #__cheetah-menu {
       position: fixed; bottom: 44px; right: 12px; z-index: 2147483647;
       background: #1a1a2e; color: #e0e0e0; border: 1px solid #2a2a3e;
       border-radius: 8px; padding: 4px 0; font: 12px/1 system-ui, sans-serif;
       box-shadow: 0 2px 12px rgba(0,0,0,0.5);
       display: none; min-width: 180px;
     }
-    #__spacecat-menu.open { display: block; }
+    #__cheetah-menu.open { display: block; }
     .__sc-item {
       display: flex; align-items: center; gap: 8px;
       padding: 8px 14px; cursor: pointer; text-decoration: none; color: #e0e0e0;
@@ -498,7 +527,7 @@ const spacesJS = `(function() {
   const label = el.querySelector(".__sc-label");
   label.textContent = space + " :" + initialPort;
 
-  if (space === "spacecat") dot.className = "__sc-dot healthy";
+  if (space === "cheetah") dot.className = "__sc-dot healthy";
 
   let allApps = {};
   let menuOpen = false;
@@ -516,8 +545,8 @@ const spacesJS = `(function() {
   menu.addEventListener("click", function(e) { e.stopPropagation(); });
 
   function renderMenu() {
-    if (!menuOpen) { menu.className = ""; menu.id = "__spacecat-menu"; return; }
-    menu.className = "open"; menu.id = "__spacecat-menu";
+    if (!menuOpen) { menu.className = ""; menu.id = "__cheetah-menu"; return; }
+    menu.className = "open"; menu.id = "__cheetah-menu";
     const list = Object.values(allApps);
     let h = "";
     for (const a of list) {
@@ -530,9 +559,9 @@ const spacesJS = `(function() {
         '<span class="info">:' + p + '</span></a>';
     }
     if (list.length > 0) h += '<div class="__sc-sep"></div>';
-    const scActive = space === "spacecat" ? " active" : "";
-    h += '<a class="__sc-item' + scActive + '" href="//spacecat.localhost:' + location.port + '/">' +
-      '<span class="__sc-dot healthy"></span>spacecat' +
+    const scActive = space === "cheetah" ? " active" : "";
+    h += '<a class="__sc-item' + scActive + '" href="//cheetah.localhost:' + location.port + '/">' +
+      '<span class="__sc-dot healthy"></span>cheetah' +
       '<span class="info">:' + location.port + '</span></a>';
     menu.innerHTML = h;
   }
@@ -559,7 +588,7 @@ const spacesJS = `(function() {
     lastPort = String(p);
   }
 
-  const es = new EventSource("//spacecat.localhost:" + location.port + "/api/events");
+  const es = new EventSource("//cheetah.localhost:" + location.port + "/api/events");
 
   es.addEventListener("init", function(e) {
     const apps = JSON.parse(e.data);
@@ -593,115 +622,8 @@ func (s *Server) handleJS(c echo.Context) error {
 	return c.Blob(http.StatusOK, "application/javascript", []byte(spacesJS))
 }
 
-// Dashboard
-
-var dashboardTmpl = template.Must(template.New("dashboard").Parse(`<!DOCTYPE html>
-<html>
-<head>
-<title>Spacecat Dashboard</title>
-<meta charset="utf-8">
-<style>
-  body { font-family: system-ui, sans-serif; margin: 2rem; background: #0a0a0a; color: #e0e0e0; }
-  h1 { color: #f0f0f0; }
-  .status { background: #1a1a2e; padding: 1rem; border-radius: 8px; margin-bottom: 2rem; }
-  .status span { margin-right: 2rem; }
-  .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; }
-  .dot.on { background: #4ade80; }
-  .dot.off { background: #ef4444; }
-  table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: 0.5rem 1rem; border-bottom: 1px solid #2a2a3e; }
-  th { color: #888; font-weight: 500; font-size: 0.85rem; text-transform: uppercase; }
-  tr:hover { background: #1a1a2e; }
-  .healthy { color: #4ade80; }
-  .unhealthy { color: #ef4444; }
-  .unknown { color: #888; }
-  .active-port { color: #4ade80; font-weight: 600; }
-  a { color: #7dd3fc; text-decoration: none; }
-  a:hover { text-decoration: underline; }
-  code { background: #1a1a2e; padding: 2px 6px; border-radius: 4px; font-size: 0.85rem; }
-  .empty { text-align: center; padding: 3rem; color: #666; }
-</style>
-</head>
-<body>
-<h1>Spacecat</h1>
-<div class="status" id="status-bar">
-  <span><span class="dot {{if .Status.PostgresRunning}}on{{else}}off{{end}}"></span> Postgres :{{.Status.PostgresPort}}</span>
-  <span>Apps: <span id="app-count">{{.Status.AppCount}}</span></span>
-</div>
-<div id="app-table"></div>
-<script>
-(function() {
-  const table = document.getElementById("app-table");
-  const countEl = document.getElementById("app-count");
-  let apps = {};
-
-  function render() {
-    const list = Object.values(apps);
-    countEl.textContent = list.length;
-    if (list.length === 0) {
-      table.innerHTML = '<div class="empty">No apps registered. Run <code>go run main.go</code> in a child app to register.</div>';
-      return;
-    }
-    let h = '<table><thead><tr>' +
-      '<th>Space</th><th>Config</th>' +
-      '<th>Blue</th><th>Green</th>' +
-      '<th>Health</th><th>Watch</th><th>Logs</th></tr></thead><tbody>';
-    for (const a of list) {
-      const watch = (a.watch.match || []).map(p => '<code>' + p + '</code>').join(' ');
-      const p1cls = a.ports.active === a.ports.blue ? ' class="active-port"' : '';
-      const p2cls = a.ports.active === a.ports.green ? ' class="active-port"' : '';
-      h += '<tr>' +
-        '<td><strong><a href="' + location.protocol + '//' + a.space + '.localhost:' + location.port + '/">' + a.space + '</a></strong></td>' +
-        '<td>' + (a.config || []).map(c => '<code>' + c + '</code>').join(' ') + '</td>' +
-        '<td' + p1cls + '>:' + a.ports.blue + '</td>' +
-        '<td' + p2cls + '>:' + a.ports.green + '</td>' +
-        '<td class="' + a.health.status + '">' + a.health.status + '</td>' +
-        '<td>' + watch + '</td>' +
-        '<td>' + (a.logs || []).length + '</td></tr>';
-    }
-    h += '</tbody></table>';
-    table.innerHTML = h;
-  }
-
-  const es = new EventSource("/api/events");
-
-  es.addEventListener("init", function(e) {
-    const list = JSON.parse(e.data);
-    apps = {};
-    for (const a of list) apps[a.space] = a;
-    render();
-  });
-
-  es.addEventListener("app", function(e) {
-    const a = JSON.parse(e.data);
-    apps[a.space] = a;
-    render();
-  });
-
-  es.addEventListener("deregister", function(e) {
-    const data = JSON.parse(e.data);
-    delete apps[data.space];
-    render();
-  });
-
-  render();
-})();
-</script>
-<script src="/spaces.js" data-space="spacecat" data-port="{{.Port}}"></script>
-</body>
-</html>`))
-
 func (s *Server) handleIndex(c echo.Context) error {
-	data := struct {
-		Apps   []*App
-		Port   int
-		Status Status
-	}{
-		Apps:   s.list(),
-		Port:   s.config.DashboardPort,
-		Status: s.status(),
-	}
-	return dashboardTmpl.Execute(c.Response().Writer, data)
+	return Dashboard(s.config.DashboardPort, s.status()).Render(c.Request().Context(), c.Response().Writer)
 }
 
 // State persistence

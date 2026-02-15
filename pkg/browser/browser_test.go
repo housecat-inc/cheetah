@@ -19,7 +19,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/housecat-inc/spacecat/pkg/api"
+	"github.com/housecat-inc/cheetah/pkg/api"
 )
 
 const (
@@ -43,8 +43,8 @@ func TestDashboardAndProxy(t *testing.T) {
 	r := require.New(t)
 	screenshots := t.ArtifactDir()
 
-	bin := filepath.Join(t.TempDir(), "spacecat")
-	out, err := exec.Command("go", "build", "-o", bin, "../../cmd/spacecat").CombinedOutput()
+	bin := filepath.Join(t.TempDir(), "cheetah")
+	out, err := exec.Command("go", "build", "-o", bin, "../../cmd/cheetah").CombinedOutput()
 	r.NoError(err, string(out))
 
 	proc := exec.Command(bin)
@@ -62,7 +62,7 @@ func TestDashboardAndProxy(t *testing.T) {
 		proc.Wait()
 	})
 
-	dashURL := fmt.Sprintf("http://spacecat.localhost:%d", testDashPort)
+	dashURL := fmt.Sprintf("http://cheetah.localhost:%d", testDashPort)
 	waitForReady(t, dashURL+"/api/status")
 
 	resp := registerApp(t, dashURL, "myapp")

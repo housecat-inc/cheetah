@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/housecat-inc/spacecat/pkg/config"
+	"github.com/housecat-inc/cheetah/pkg/config"
 )
 
 func TestLoad(t *testing.T) {
@@ -67,10 +67,7 @@ func TestLoad(t *testing.T) {
 			_name:    "example key not in defaults ignored",
 			defaults: map[string]string{"PORT": "8080"},
 			files:    map[string]string{".envrc.example": "export SECRET=hunter2"},
-			out: config.Out{
-				Env:       map[string]string{"PORT": "8080"},
-				Providers: []string{".envrc.example"},
-			},
+			out:      config.Out{Env: map[string]string{"PORT": "8080"}},
 		},
 		{
 			_name:    "example with quotes and comments",
@@ -82,36 +79,60 @@ func TestLoad(t *testing.T) {
 			},
 		},
 		{
-			_name: "nil defaults providers",
+			_name: "empty files not providers",
 			files: map[string]string{".envrc": "", ".envrc.example": ""},
-			out: config.Out{
-				Env:       map[string]string{},
-				Providers: []string{".envrc", ".envrc.example"},
-			},
+			out:   config.Out{Env: map[string]string{}},
 		},
 		{
-			_name:    "with defaults providers include main.go",
+			_name:    "main.go provider when defaults contribute",
 			defaults: map[string]string{"PORT": "8080"},
 			files:    map[string]string{".envrc": "", "main.go": "", ".envrc.example": ""},
 			out: config.Out{
 				Env:       map[string]string{"PORT": "8080"},
-				Providers: []string{".envrc", "main.go", ".envrc.example"},
+				Providers: []string{"main.go"},
 			},
 		},
 		{
 			_name: "nil defaults skips main.go",
 			files: map[string]string{".envrc": "", "main.go": "", ".envrc.example": ""},
-			out: config.Out{
-				Env:       map[string]string{},
-				Providers: []string{".envrc", ".envrc.example"},
-			},
+			out:   config.Out{Env: map[string]string{}},
 		},
 		{
 			_name:    "with defaults main.go missing",
 			defaults: map[string]string{"PORT": "8080"},
 			files:    map[string]string{".envrc": ""},
+			out:      config.Out{Env: map[string]string{"PORT": "8080"}},
+		},
+		{
+			_name: "envrc provides values",
+			files: map[string]string{".envrc": "export GOOGLE_CLIENT_ID=abc123"},
+			out: config.Out{
+				Env:       map[string]string{"GOOGLE_CLIENT_ID": "abc123"},
+				Providers: []string{".envrc"},
+			},
+		},
+		{
+			_name: "envrc overrides example",
+			files: map[string]string{
+				".envrc.example": "export PORT=3000",
+				".envrc":         "export PORT=8080",
+			},
 			out: config.Out{
 				Env:       map[string]string{"PORT": "8080"},
+				Providers: []string{".envrc.example", ".envrc"},
+			},
+		},
+		{
+			_name: "envrc empty values not provider",
+			files: map[string]string{".envrc": "export GOOGLE_CLIENT_ID=\"\""},
+			out:   config.Out{Env: map[string]string{"GOOGLE_CLIENT_ID": ""}},
+		},
+		{
+			_name:    "envrc overrides defaults",
+			defaults: map[string]string{"PORT": "8080"},
+			files:    map[string]string{".envrc": "export PORT=9090\nexport SECRET=xyz"},
+			out: config.Out{
+				Env:       map[string]string{"PORT": "9090", "SECRET": "xyz"},
 				Providers: []string{".envrc"},
 			},
 		},
