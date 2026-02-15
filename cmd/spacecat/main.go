@@ -32,9 +32,9 @@ import (
 const maxRecentLogs = 100
 
 var (
-	bluePortStart = config.EnvOrInt("APP_PORT", 4000)
-	dashboardPort = config.EnvOrInt("PORT", 50000)
-	postgresPort  = config.EnvOrInt("PG_PORT", 54320)
+	bluePortStart = config.EnvOr("APP_PORT", 4000)
+	dashboardPort = config.EnvOr("PORT", 50000)
+	postgresPort  = config.EnvOr("PG_PORT", 54320)
 )
 
 func main() {
@@ -209,7 +209,7 @@ func (r *registry) register(req api.RegisterRequest) (*api.App, bool) {
 	app := &api.App{
 		Space:          req.Space,
 		Dir:            req.Dir,
-		ConfigFile:     req.ConfigFile,
+		Config:         req.Config,
 		DatabaseURL:    fmt.Sprintf("postgres://postgres:postgres@localhost:%d/%s?sslmode=disable", postgresPort, req.Space),
 		WatchPatterns:  req.WatchPatterns,
 		IgnorePatterns: req.IgnorePatterns,
@@ -718,7 +718,7 @@ var dashboardTmpl = template.Must(template.New("dashboard").Parse(`<!DOCTYPE htm
       const p2cls = a.port_active === a.port2 ? ' class="active-port"' : '';
       h += '<tr>' +
         '<td><strong><a href="' + location.protocol + '//' + a.space + '.localhost:' + location.port + '/">' + a.space + '</a></strong></td>' +
-        '<td><code>' + (a.config_file || '') + '</code></td>' +
+        '<td>' + (a.config || []).map(c => '<code>' + c + '</code>').join(' ') + '</td>' +
         '<td' + p1cls + '>:' + a.port1 + '</td>' +
         '<td' + p2cls + '>:' + a.port2 + '</td>' +
         '<td class="' + a.health_status + '">' + a.health_status + '</td>' +

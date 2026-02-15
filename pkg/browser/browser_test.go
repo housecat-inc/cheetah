@@ -133,7 +133,7 @@ func waitForReady(t *testing.T, url string) {
 func registerApp(t *testing.T, dashURL, space string) api.RegisterResponse {
 	t.Helper()
 	body, _ := json.Marshal(api.RegisterRequest{
-		ConfigFile:    ".envrc",
+		Config:        []string{".envrc"},
 		Dir:           t.TempDir(),
 		Space:         space,
 		WatchPatterns: []string{"*.go"},

@@ -13,56 +13,110 @@ func TestLoad(t *testing.T) {
 		_name    string
 		defaults map[string]string
 		env      map[string]string
-		example  string
-		out      map[string]string
+		files    map[string]string
+		out      config.Out
 	}{
 		{
 			_name:    "defaults only",
 			defaults: map[string]string{"PORT": "8080"},
-			out:      map[string]string{"PORT": "8080"},
+			out:      config.Out{Env: map[string]string{"PORT": "8080"}},
 		},
 		{
 			_name:    "env overrides default",
 			defaults: map[string]string{"PORT": "8080"},
 			env:      map[string]string{"PORT": "9090"},
-			out:      map[string]string{"PORT": "9090"},
+			out:      config.Out{Env: map[string]string{"PORT": "9090"}},
 		},
 		{
 			_name:    "env missing uses default",
 			defaults: map[string]string{"DATABASE_URL": "", "PORT": "8080"},
 			env:      map[string]string{"PORT": "3000"},
-			out:      map[string]string{"DATABASE_URL": "", "PORT": "3000"},
-		},
-		{
-			_name:    "default overrides example",
-			defaults: map[string]string{"PORT": "8080"},
-			example:  "export PORT=3000",
-			out:      map[string]string{"PORT": "8080"},
+			out:      config.Out{Env: map[string]string{"DATABASE_URL": "", "PORT": "3000"}},
 		},
 		{
 			_name:    "example fills empty default",
 			defaults: map[string]string{"DATABASE_URL": "", "PORT": "8080"},
-			example:  "export DATABASE_URL=postgres://localhost/dev\nexport PORT=3000",
-			out:      map[string]string{"DATABASE_URL": "postgres://localhost/dev", "PORT": "8080"},
+			files:    map[string]string{".envrc.example": "export DATABASE_URL=postgres://localhost/dev\nexport PORT=3000"},
+			out: config.Out{
+				Env:       map[string]string{"DATABASE_URL": "postgres://localhost/dev", "PORT": "8080"},
+				Providers: []string{".envrc.example"},
+			},
+		},
+		{
+			_name:    "default overrides example",
+			defaults: map[string]string{"PORT": "8080"},
+			files:    map[string]string{".envrc.example": "export PORT=3000"},
+			out: config.Out{
+				Env:       map[string]string{"PORT": "8080"},
+				Providers: []string{".envrc.example"},
+			},
 		},
 		{
 			_name:    "env overrides default and example",
 			defaults: map[string]string{"PORT": "8080"},
 			env:      map[string]string{"PORT": "9090"},
-			example:  "export PORT=3000",
-			out:      map[string]string{"PORT": "9090"},
+			files:    map[string]string{".envrc.example": "export PORT=3000"},
+			out: config.Out{
+				Env:       map[string]string{"PORT": "9090"},
+				Providers: []string{".envrc.example"},
+			},
 		},
 		{
 			_name:    "example key not in defaults ignored",
 			defaults: map[string]string{"PORT": "8080"},
-			example:  "export SECRET=hunter2",
-			out:      map[string]string{"PORT": "8080"},
+			files:    map[string]string{".envrc.example": "export SECRET=hunter2"},
+			out: config.Out{
+				Env:       map[string]string{"PORT": "8080"},
+				Providers: []string{".envrc.example"},
+			},
 		},
 		{
 			_name:    "example with quotes and comments",
 			defaults: map[string]string{"A": "keep", "B": "", "C": ""},
-			example:  "# config\nexport A=\"hello\"\nexport B='world'\nC=plain",
-			out:      map[string]string{"A": "keep", "B": "world", "C": "plain"},
+			files:    map[string]string{".envrc.example": "# config\nexport A=\"hello\"\nexport B='world'\nC=plain"},
+			out: config.Out{
+				Env:       map[string]string{"A": "keep", "B": "world", "C": "plain"},
+				Providers: []string{".envrc.example"},
+			},
+		},
+		{
+			_name:    "nil defaults providers",
+			files:    map[string]string{".envrc": "", ".envrc.example": ""},
+			out: config.Out{
+				Env:       map[string]string{},
+				Providers: []string{".envrc", ".envrc.example"},
+			},
+		},
+		{
+			_name:    "with defaults providers include main.go",
+			defaults: map[string]string{"PORT": "8080"},
+			files:    map[string]string{".envrc": "", "main.go": "", ".envrc.example": ""},
+			out: config.Out{
+				Env:       map[string]string{"PORT": "8080"},
+				Providers: []string{".envrc", "main.go", ".envrc.example"},
+			},
+		},
+		{
+			_name:    "nil defaults skips main.go",
+			files:    map[string]string{".envrc": "", "main.go": "", ".envrc.example": ""},
+			out: config.Out{
+				Env:       map[string]string{},
+				Providers: []string{".envrc", ".envrc.example"},
+			},
+		},
+		{
+			_name:    "with defaults main.go missing",
+			defaults: map[string]string{"PORT": "8080"},
+			files:    map[string]string{".envrc": ""},
+			out: config.Out{
+				Env:       map[string]string{"PORT": "8080"},
+				Providers: []string{".envrc"},
+			},
+		},
+		{
+			_name:    "no files exist",
+			defaults: map[string]string{"PORT": "8080"},
+			out:      config.Out{Env: map[string]string{"PORT": "8080"}},
 		},
 	}
 
@@ -70,11 +124,7 @@ func TestLoad(t *testing.T) {
 		t.Run(tt._name, func(t *testing.T) {
 			a := assert.New(t)
 
-			env := config.TestEnv(tt.env)
-			if tt.example != "" {
-				env.ReadFile = func(string) ([]byte, error) { return []byte(tt.example), nil }
-			}
-			out := config.Load(env, ".envrc.example", tt.defaults)
+			out := config.Load(config.TestEnv(tt.env, tt.files), "", tt.defaults)
 			a.Equal(tt.out, out)
 		})
 	}

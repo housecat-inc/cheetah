@@ -19,7 +19,7 @@ import (
 
 const startTimeout = 30 * time.Second
 
-var port = config.EnvOrInt("PG_PORT", 54320)
+var port = config.EnvOr("PG_PORT", 54320)
 
 func Run() (string, error) {
 	url := fmt.Sprintf("postgres://postgres:postgres@localhost:%d/postgres?sslmode=disable", port)

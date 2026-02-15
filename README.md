@@ -18,7 +18,7 @@ Conventions over configuration:
 - code: `$SPACE` or git worktree dir with branch name
 - dependency manifest: `go.mod`
 - config: `.envrc`
-- backing services: multi-tenant postgres, `find sqlc.yaml`, `goose`, and `$DATABASE_URL`
+- backing services: multi-tenant postgres, `find sqlc.yaml`, migrate template database once then create `$DATABASE_URL`
 - build: watch files; ignore `.gitignore`, `DO NOT EDIT` comment; run `go generate`, `go build cmd/app`
 - port: `$PORT` and `$PROXY_PORT` with blue/green router and OAuth bouncer
 - disposability: `/health` endpoint

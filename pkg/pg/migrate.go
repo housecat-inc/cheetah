@@ -19,36 +19,48 @@ import (
 
 const prefix = "t_"
 
-func Hash(dir string) (string, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return "", errors.Wrap(err, "read migration dir")
-	}
-
-	var names []string
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".sql") {
-			names = append(names, e.Name())
-		}
-	}
-	sort.Strings(names)
-
+func Hash(paths []string) (string, error) {
 	h := sha256.New()
-	for _, name := range names {
-		data, err := os.ReadFile(filepath.Join(dir, name))
+	for _, p := range paths {
+		info, err := os.Stat(p)
 		if err != nil {
-			return "", errors.Wrapf(err, "read %s", name)
+			return "", errors.Wrapf(err, "stat %s", p)
 		}
-		h.Write([]byte(name))
-		h.Write(data)
+		if !info.IsDir() {
+			data, err := os.ReadFile(p)
+			if err != nil {
+				return "", errors.Wrapf(err, "read %s", p)
+			}
+			h.Write([]byte(filepath.Base(p)))
+			h.Write(data)
+			continue
+		}
+		entries, err := os.ReadDir(p)
+		if err != nil {
+			return "", errors.Wrapf(err, "read dir %s", p)
+		}
+		var names []string
+		for _, e := range entries {
+			if !e.IsDir() && strings.HasSuffix(e.Name(), ".sql") {
+				names = append(names, e.Name())
+			}
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			data, err := os.ReadFile(filepath.Join(p, name))
+			if err != nil {
+				return "", errors.Wrapf(err, "read %s", name)
+			}
+			h.Write([]byte(name))
+			h.Write(data)
+		}
 	}
-
 	return fmt.Sprintf("%x", h.Sum(nil))[:12], nil
 }
 
 // Template creates a template database named tmpl_{hash} if it doesn't
 // already exist, then runs goose migrations on it. Returns the template DB name.
-func Template(adminURL string, dir string, hash string) (string, error) {
+func Template(adminURL string, dirs []string, hash string) (string, error) {
 	name := prefix + hash
 
 	adminDB, err := sql.Open("postgres", adminURL)
@@ -83,8 +95,17 @@ func Template(adminURL string, dir string, hash string) (string, error) {
 	defer tmplDB.Close()
 
 	goose.SetDialect("postgres")
-	if err := goose.Up(tmplDB, dir); err != nil {
-		return "", errors.Wrap(err, "run migrations")
+	for _, dir := range dirs {
+		info, err := os.Stat(dir)
+		if err != nil {
+			return "", errors.Wrapf(err, "stat %s", dir)
+		}
+		if !info.IsDir() {
+			continue
+		}
+		if err := goose.Up(tmplDB, dir); err != nil {
+			return "", errors.Wrapf(err, "run migrations in %s", dir)
+		}
 	}
 
 	return name, nil
@@ -145,42 +166,81 @@ func quoteIdent(s string) string {
 
 type sqlcConfig struct {
 	SQL []struct {
-		Schema string `yaml:"schema"`
+		Schema interface{} `yaml:"schema"`
 	} `yaml:"sql"`
 }
 
-func MigrationDir(dir string) (string, error) {
-	for _, name := range []string{"sqlc.yaml", "sqlc.yml"} {
-		path := filepath.Join(dir, name)
-		data, err := os.ReadFile(path)
+func MigrationDirs(dir string) ([]string, error) {
+	var paths []string
+	seen := map[string]bool{}
+
+	for _, cfgPath := range findSqlcConfigs(dir) {
+		data, err := os.ReadFile(cfgPath)
 		if err != nil {
 			continue
 		}
 		var cfg sqlcConfig
 		if err := yaml.Unmarshal(data, &cfg); err != nil {
-			return "", errors.Wrapf(err, "parse %s", name)
+			return nil, errors.Wrapf(err, "parse %s", filepath.Base(cfgPath))
 		}
-		if len(cfg.SQL) > 0 && cfg.SQL[0].Schema != "" {
-			schema := filepath.Join(dir, cfg.SQL[0].Schema)
-			if info, err := os.Stat(schema); err == nil && info.IsDir() {
-				return schema, nil
+		cfgDir := filepath.Dir(cfgPath)
+		for _, entry := range cfg.SQL {
+			for _, s := range schemaPaths(entry.Schema) {
+				p := filepath.Join(cfgDir, s)
+				if _, err := os.Stat(p); err == nil && !seen[p] {
+					seen[p] = true
+					paths = append(paths, p)
+				}
 			}
 		}
 	}
 
-	fallback := filepath.Join(dir, "migrations")
-	if info, err := os.Stat(fallback); err == nil && info.IsDir() {
-		return fallback, nil
+	if len(paths) == 0 {
+		fallback := filepath.Join(dir, "migrations")
+		if info, err := os.Stat(fallback); err == nil && info.IsDir() {
+			return []string{fallback}, nil
+		}
+		return nil, errors.Newf("no migration directory found in %s", dir)
 	}
 
-	return "", errors.Newf("no migration directory found in %s", dir)
+	return paths, nil
 }
 
 func HasSqlcConfig(dir string) bool {
-	for _, name := range []string{"sqlc.yaml", "sqlc.yml"} {
-		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
-			return true
+	return len(findSqlcConfigs(dir)) > 0
+}
+
+func findSqlcConfigs(dir string) []string {
+	var configs []string
+	filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
 		}
+		if d.IsDir() {
+			return nil
+		}
+		name := d.Name()
+		if name == "sqlc.yaml" || name == "sqlc.yml" {
+			configs = append(configs, path)
+		}
+		return nil
+	})
+	sort.Strings(configs)
+	return configs
+}
+
+func schemaPaths(v interface{}) []string {
+	switch v := v.(type) {
+	case string:
+		return []string{v}
+	case []interface{}:
+		var paths []string
+		for _, p := range v {
+			if s, ok := p.(string); ok {
+				paths = append(paths, s)
+			}
+		}
+		return paths
 	}
-	return false
+	return nil
 }

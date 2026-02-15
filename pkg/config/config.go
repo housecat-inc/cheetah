@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -20,13 +21,23 @@ type Config struct {
 type Env struct {
 	Getenv   func(string) string
 	ReadFile func(string) ([]byte, error)
+	Stat     func(string) (os.FileInfo, error)
 }
 
-func EnvOrInt(key string, fallback int) int {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
+func EnvOr[T string | int](key string, fallback T) T {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	switch any(fallback).(type) {
+	case string:
+		return any(v).(T)
+	case int:
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fallback
 		}
+		return any(n).(T)
 	}
 	return fallback
 }
@@ -46,35 +57,62 @@ func DefaultEnv() Env {
 	return Env{
 		Getenv:   os.Getenv,
 		ReadFile: os.ReadFile,
+		Stat:     os.Stat,
 	}
 }
 
-func Load(env Env, exampleFile string, defaults map[string]string) map[string]string {
-	out := make(map[string]string, len(defaults))
+type Out struct {
+	Env       map[string]string
+	Providers []string
+}
 
-	if data, err := env.ReadFile(exampleFile); err == nil {
+func Load(env Env, dir string, defaults ...map[string]string) Out {
+	var defs map[string]string
+	if len(defaults) > 0 {
+		defs = defaults[0]
+	}
+
+	candidates := []string{".envrc"}
+	if defs != nil {
+		candidates = append(candidates, "main.go")
+	}
+	candidates = append(candidates, ".envrc.example")
+
+	var strategies []string
+	for _, f := range candidates {
+		if _, err := env.Stat(filepath.Join(dir, f)); err == nil {
+			strategies = append(strategies, f)
+		}
+	}
+
+	vars := make(map[string]string, len(defs))
+
+	if data, err := env.ReadFile(filepath.Join(dir, ".envrc.example")); err == nil {
 		for k, v := range ParseExample(data) {
-			if _, ok := defaults[k]; ok {
-				out[k] = v
+			if _, ok := defs[k]; ok {
+				vars[k] = v
 			}
 		}
 	}
 
-	for k, v := range defaults {
+	for k, v := range defs {
 		if v != "" {
-			out[k] = v
-		} else if _, ok := out[k]; !ok {
-			out[k] = v
+			vars[k] = v
+		} else if _, ok := vars[k]; !ok {
+			vars[k] = v
 		}
 	}
 
-	for k := range out {
+	for k := range vars {
 		if e := env.Getenv(k); e != "" {
-			out[k] = e
+			vars[k] = e
 		}
 	}
 
-	return out
+	return Out{
+		Env:       vars,
+		Providers: strategies,
+	}
 }
 
 func ParseExample(data []byte) map[string]string {
@@ -113,10 +151,21 @@ func TestConfig(cmds map[string]CmdResult) Config {
 	}
 }
 
-func TestEnv(vars map[string]string) Env {
+func TestEnv(vars map[string]string, files map[string]string) Env {
 	return Env{
-		Getenv:   func(key string) string { return vars[key] },
-		ReadFile: func(string) ([]byte, error) { return nil, os.ErrNotExist },
+		Getenv: func(key string) string { return vars[key] },
+		ReadFile: func(name string) ([]byte, error) {
+			if content, ok := files[name]; ok {
+				return []byte(content), nil
+			}
+			return nil, os.ErrNotExist
+		},
+		Stat: func(name string) (os.FileInfo, error) {
+			if _, ok := files[name]; ok {
+				return nil, nil
+			}
+			return nil, os.ErrNotExist
+		},
 	}
 }
 

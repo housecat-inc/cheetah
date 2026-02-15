@@ -26,23 +26,19 @@ import (
 	"github.com/housecat-inc/spacecat/pkg/watch"
 )
 
-const defaultSpacecatURL = "http://spacecat.localhost:50000"
+const url = "http://spacecat.localhost:50000"
 
 // Run registers with the spacecat dashboard, watches for file changes,
 // and manages a blue/green build/run cycle. It blocks until interrupted.
 func Run(defaults ...map[string]string) {
-	var defs map[string]string
-	if len(defaults) > 0 {
-		defs = defaults[0]
-	}
-	appEnv := config.Load(config.DefaultEnv(), ".envrc.example", defs)
-
-	spacecatURL := envOr("SPACECAT_URL", defaultSpacecatURL)
-	sp, err := code.Default()
+	spacecatURL := config.EnvOr("SPACECAT_URL", url)
+	sp, err := code.System()
 	if err != nil {
 		slog.Error("failed to determine space", "error", err)
 		os.Exit(1)
 	}
+
+	cfg := config.Load(config.DefaultEnv(), sp.Dir, defaults...)
 
 	logger := slog.New(tint.NewHandler(os.Stderr, &tint.Options{
 		Level:      slog.LevelInfo,
@@ -57,9 +53,9 @@ func Run(defaults ...map[string]string) {
 	slog.SetDefault(logger)
 
 	resp, err := register(spacecatURL, api.RegisterRequest{
-		Space:         sp.Name,
+		Config:        cfg.Providers,
 		Dir:           sp.Dir,
-		ConfigFile:    ".envrc",
+		Space:         sp.Name,
 		WatchPatterns: []string{".envrc", "*.go", "*.sql", "go.mod"},
 	})
 	if err != nil {
@@ -69,7 +65,7 @@ func Run(defaults ...map[string]string) {
 	logger.Info("register", "port1", resp.Port1, "port2", resp.Port2)
 
 	runner := &appRunner{
-		appEnv:      appEnv,
+		appEnv:      cfg.Env,
 		cmds:        make(map[int]*exec.Cmd),
 		dir:         sp.Dir,
 		logger:      logger,
@@ -286,12 +282,12 @@ func (r *appRunner) stopAll() {
 // ensureDatabase discovers migrations, hashes them, creates/updates the
 // template DB, and clones it to the app's database.
 func (r *appRunner) ensureDatabase() error {
-	migDir, err := pg.MigrationDir(".")
+	migDirs, err := pg.MigrationDirs(".")
 	if err != nil {
 		return nil // no migrations, skip silently
 	}
 
-	hash, err := pg.Hash(migDir)
+	hash, err := pg.Hash(migDirs)
 	if err != nil {
 		return errors.Wrap(err, "hash migrations")
 	}
@@ -301,7 +297,7 @@ func (r *appRunner) ensureDatabase() error {
 		return errors.Wrap(err, "admin url")
 	}
 
-	tmplName, err := pg.Template(adminURL, migDir, hash)
+	tmplName, err := pg.Template(adminURL, migDirs, hash)
 	if err != nil {
 		return errors.Wrap(err, "ensure template")
 	}
@@ -386,11 +382,4 @@ func register(spacecatURL string, req api.RegisterRequest) (*api.RegisterRespons
 func deregister(spacecatURL, space string) {
 	req, _ := http.NewRequest(http.MethodDelete, spacecatURL+"/api/apps/"+space, nil)
 	http.DefaultClient.Do(req)
-}
-
-func envOr(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
 }

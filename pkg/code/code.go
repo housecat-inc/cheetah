@@ -48,11 +48,11 @@ func Code(cfg Config) (Out, error) {
 	return Out{Dir: dir, Name: name}, nil
 }
 
-func Default() (Out, error) {
-	return Code(DefaultConfig())
+func System() (Out, error) {
+	return Code(SystemConfig())
 }
 
-func DefaultConfig() Config {
+func SystemConfig() Config {
 	return Config{
 		CmdOutput: func(name string, args ...string) (string, error) {
 			out, err := exec.Command(name, args...).Output()

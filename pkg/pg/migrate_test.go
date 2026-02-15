@@ -116,11 +116,11 @@ func TestHashMigrations(t *testing.T) {
 				os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644)
 			}
 
-			hash1, err := Hash(dir)
+			hash1, err := Hash([]string{dir})
 			a.NoError(err)
 			a.Len(hash1, 12)
 
-			hash2, err := Hash(dir)
+			hash2, err := Hash([]string{dir})
 			a.NoError(err)
 			a.Equal(hash1, hash2, "hash should be deterministic")
 		})
@@ -132,21 +132,21 @@ func TestHashMigrations_ContentChanges(t *testing.T) {
 	dir := t.TempDir()
 
 	os.WriteFile(filepath.Join(dir, "001.sql"), []byte("v1"), 0o644)
-	hash1, err := Hash(dir)
+	hash1, err := Hash([]string{dir})
 	a.NoError(err)
 
 	os.WriteFile(filepath.Join(dir, "001.sql"), []byte("v2"), 0o644)
-	hash2, err := Hash(dir)
+	hash2, err := Hash([]string{dir})
 	a.NoError(err)
 
 	a.NotEqual(hash1, hash2, "hash should change when content changes")
 }
 
-func TestFindMigrationDir(t *testing.T) {
+func TestMigrationDirs(t *testing.T) {
 	tests := []struct {
 		_name string
 		setup func(dir string)
-		out   string
+		out   []string
 		err   bool
 	}{
 		{
@@ -155,14 +155,50 @@ func TestFindMigrationDir(t *testing.T) {
 				os.WriteFile(filepath.Join(dir, "sqlc.yaml"), []byte("sql:\n  - schema: \"sql\"\n"), 0o644)
 				os.MkdirAll(filepath.Join(dir, "sql"), 0o755)
 			},
-			out: "sql",
+			out: []string{"sql"},
+		},
+		{
+			_name: "schema as list",
+			setup: func(dir string) {
+				os.WriteFile(filepath.Join(dir, "sqlc.yaml"), []byte("sql:\n  - schema:\n      - \"sql\"\n      - \"schema.sql\"\n"), 0o644)
+				os.MkdirAll(filepath.Join(dir, "sql"), 0o755)
+				os.WriteFile(filepath.Join(dir, "schema.sql"), []byte("CREATE TABLE t (id int);"), 0o644)
+			},
+			out: []string{"sql", "schema.sql"},
+		},
+		{
+			_name: "nested sqlc.yaml",
+			setup: func(dir string) {
+				os.MkdirAll(filepath.Join(dir, "services", "api", "db"), 0o755)
+				os.WriteFile(filepath.Join(dir, "services", "api", "sqlc.yaml"), []byte("sql:\n  - schema: \"db\"\n"), 0o644)
+			},
+			out: []string{filepath.Join("services", "api", "db")},
+		},
+		{
+			_name: "multiple sqlc configs",
+			setup: func(dir string) {
+				os.MkdirAll(filepath.Join(dir, "svc-a", "sql"), 0o755)
+				os.WriteFile(filepath.Join(dir, "svc-a", "sqlc.yaml"), []byte("sql:\n  - schema: \"sql\"\n"), 0o644)
+				os.MkdirAll(filepath.Join(dir, "svc-b", "sql"), 0o755)
+				os.WriteFile(filepath.Join(dir, "svc-b", "sqlc.yaml"), []byte("sql:\n  - schema: \"sql\"\n"), 0o644)
+			},
+			out: []string{filepath.Join("svc-a", "sql"), filepath.Join("svc-b", "sql")},
+		},
+		{
+			_name: "multiple sql entries",
+			setup: func(dir string) {
+				os.MkdirAll(filepath.Join(dir, "db"), 0o755)
+				os.MkdirAll(filepath.Join(dir, "analytics"), 0o755)
+				os.WriteFile(filepath.Join(dir, "sqlc.yaml"), []byte("sql:\n  - schema: \"db\"\n  - schema: \"analytics\"\n"), 0o644)
+			},
+			out: []string{"db", "analytics"},
 		},
 		{
 			_name: "fallback to migrations dir",
 			setup: func(dir string) {
 				os.MkdirAll(filepath.Join(dir, "migrations"), 0o755)
 			},
-			out: "migrations",
+			out: []string{"migrations"},
 		},
 		{
 			_name: "no migration dir",
@@ -176,12 +212,16 @@ func TestFindMigrationDir(t *testing.T) {
 			dir := t.TempDir()
 			tt.setup(dir)
 
-			out, err := MigrationDir(dir)
+			out, err := MigrationDirs(dir)
 			if tt.err {
 				a.Error(err)
 			} else {
 				a.NoError(err)
-				a.Equal(filepath.Join(dir, tt.out), out)
+				var expected []string
+				for _, p := range tt.out {
+					expected = append(expected, filepath.Join(dir, p))
+				}
+				a.Equal(expected, out)
 			}
 		})
 	}
@@ -204,6 +244,14 @@ func TestHasSqlcConfig(t *testing.T) {
 			_name: "sqlc.yml exists",
 			setup: func(dir string) {
 				os.WriteFile(filepath.Join(dir, "sqlc.yml"), []byte("sql: []\n"), 0o644)
+			},
+			out: true,
+		},
+		{
+			_name: "nested sqlc.yaml",
+			setup: func(dir string) {
+				os.MkdirAll(filepath.Join(dir, "services", "api"), 0o755)
+				os.WriteFile(filepath.Join(dir, "services", "api", "sqlc.yaml"), []byte("sql: []\n"), 0o644)
 			},
 			out: true,
 		},
@@ -300,18 +348,18 @@ func TestTemplatePipeline(t *testing.T) {
 				}
 			}
 
-			migDir, err := MigrationDir(dir)
+			migDirs, err := MigrationDirs(dir)
 			r.NoError(err)
 
-			hash, err := Hash(migDir)
+			hash, err := Hash(migDirs)
 			r.NoError(err)
 			a.Len(hash, 12)
 
-			tmplName, err := Template(adminURL, migDir, hash)
+			tmplName, err := Template(adminURL, migDirs, hash)
 			r.NoError(err)
 			a.Equal(prefix+hash, tmplName)
 
-			tmplName2, err := Template(adminURL, migDir, hash)
+			tmplName2, err := Template(adminURL, migDirs, hash)
 			r.NoError(err)
 			a.Equal(tmplName, tmplName2)
 

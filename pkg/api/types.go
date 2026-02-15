@@ -3,7 +3,7 @@ package api
 import "time"
 
 type App struct {
-	ConfigFile      string     `json:"config_file"`
+	Config          []string   `json:"config"`
 	DatabaseURL     string     `json:"database_url"`
 	Dir             string     `json:"dir"`
 	HealthStatus    string     `json:"health_status"`
@@ -33,7 +33,7 @@ type Status struct {
 }
 
 type RegisterRequest struct {
-	ConfigFile     string   `json:"config_file"`
+	Config         []string `json:"config"`
 	Dir            string   `json:"dir"`
 	IgnorePatterns []string `json:"ignore_patterns"`
 	Space          string   `json:"space"`
