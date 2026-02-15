@@ -63,7 +63,7 @@ const dashboardJS = `<script>
     let h = '<table><thead><tr>' +
       '<th>Space</th><th>Config</th>' +
       '<th>Blue</th><th>Green</th>' +
-      '<th>Watch</th><th>Logs</th></tr></thead><tbody>';
+      '<th>Health</th><th>Watch</th><th>Logs</th></tr></thead><tbody>';
     for (const a of list) {
       const watch = (a.watch.match || []).map(p => '<code>' + p + '</code>').join(' ');
       const p1cls = a.ports.active === a.ports.blue ? ' class="active-port"' : '';
@@ -73,6 +73,7 @@ const dashboardJS = `<script>
         '<td>' + (a.config || []).map(c => '<code>' + c + '</code>').join(' ') + '</td>' +
         '<td' + p1cls + '>:' + a.ports.blue + '</td>' +
         '<td' + p2cls + '>:' + a.ports.green + '</td>' +
+        '<td>' + (a.health && a.health.status || '') + '</td>' +
         '<td>' + watch + '</td>' +
         '<td>' + (a.logs || []).length + '</td></tr>';
     }
