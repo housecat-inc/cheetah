@@ -70,7 +70,7 @@ func main() {
 </style>
 </head>
 <body>
-<h1>Hello, %s!</h1>
+<h1>Hello, %s</h1>
 <h2>Leave a greeting</h2>
 <form method="POST" action="/greetings">
   <input name="name" placeholder="Your name" required>

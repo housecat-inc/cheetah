@@ -169,7 +169,11 @@ func TestEnv(vars map[string]string, files map[string]string) Env {
 	}
 }
 
-func Sync(cfg Config) error {
+func Sync(cfg Config, dir string) error {
+	if _, err := os.Stat(filepath.Join(dir, ".envrc")); err != nil {
+		return nil
+	}
+
 	if err := cfg.Run("direnv", "allow"); err != nil {
 		return errors.Wrap(err, "direnv allow")
 	}

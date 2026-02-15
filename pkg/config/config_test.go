@@ -1,6 +1,8 @@
 package config_test
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -80,8 +82,8 @@ func TestLoad(t *testing.T) {
 			},
 		},
 		{
-			_name:    "nil defaults providers",
-			files:    map[string]string{".envrc": "", ".envrc.example": ""},
+			_name: "nil defaults providers",
+			files: map[string]string{".envrc": "", ".envrc.example": ""},
 			out: config.Out{
 				Env:       map[string]string{},
 				Providers: []string{".envrc", ".envrc.example"},
@@ -97,8 +99,8 @@ func TestLoad(t *testing.T) {
 			},
 		},
 		{
-			_name:    "nil defaults skips main.go",
-			files:    map[string]string{".envrc": "", "main.go": "", ".envrc.example": ""},
+			_name: "nil defaults skips main.go",
+			files: map[string]string{".envrc": "", "main.go": "", ".envrc.example": ""},
 			out: config.Out{
 				Env:       map[string]string{},
 				Providers: []string{".envrc", ".envrc.example"},
@@ -180,15 +182,22 @@ func TestParseExample(t *testing.T) {
 
 func TestSync(t *testing.T) {
 	tests := []struct {
-		_name string
-		cmds  map[string]config.CmdResult
-		err   string
+		_name  string
+		cmds   map[string]config.CmdResult
+		envrc  bool
+		err    string
 	}{
 		{
-			_name: "success",
+			_name: "no envrc skips direnv",
+			envrc: false,
+		},
+		{
+			_name: "envrc present success",
+			envrc: true,
 		},
 		{
 			_name: "direnv allow fails",
+			envrc: true,
 			cmds: map[string]config.CmdResult{
 				"direnv allow": {Err: "exit status 1"},
 			},
@@ -200,8 +209,13 @@ func TestSync(t *testing.T) {
 		t.Run(tt._name, func(t *testing.T) {
 			a := assert.New(t)
 
+			dir := t.TempDir()
+			if tt.envrc {
+				os.WriteFile(filepath.Join(dir, ".envrc"), nil, 0o644)
+			}
+
 			cfg := config.TestConfig(tt.cmds)
-			err := config.Sync(cfg)
+			err := config.Sync(cfg, dir)
 			if tt.err != "" {
 				a.ErrorContains(err, tt.err)
 				return

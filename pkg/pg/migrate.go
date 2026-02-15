@@ -19,6 +19,40 @@ import (
 
 const prefix = "t_"
 
+func Ensure(databaseURL string) error {
+	migDirs, err := MigrationDirs(".")
+	if err != nil {
+		return nil
+	}
+
+	hash, err := Hash(migDirs)
+	if err != nil {
+		return errors.Wrap(err, "hash migrations")
+	}
+
+	adminURL, err := AdminURL(databaseURL)
+	if err != nil {
+		return errors.Wrap(err, "admin url")
+	}
+
+	tmplName, err := Template(adminURL, migDirs, hash)
+	if err != nil {
+		return errors.Wrap(err, "ensure template")
+	}
+
+	appDBName, err := DBName(databaseURL)
+	if err != nil {
+		return errors.Wrap(err, "db name")
+	}
+
+	if err := Create(adminURL, tmplName, appDBName); err != nil {
+		return errors.Wrap(err, "clone db")
+	}
+
+	slog.Info("database", "template", tmplName, "database_url", databaseURL)
+	return nil
+}
+
 func Hash(paths []string) (string, error) {
 	h := sha256.New()
 	for _, p := range paths {

@@ -46,7 +46,7 @@ func New(dir string, patterns, ignorePatterns []string, onChange func(path strin
 		dir:            dir,
 		patterns:       patterns,
 		ignorePatterns: ignorePatterns,
-		onChange:        onChange,
+		onChange:       onChange,
 		logger:         slog.Default(),
 	}
 }

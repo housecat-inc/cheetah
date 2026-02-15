@@ -67,8 +67,8 @@ func TestDashboardAndProxy(t *testing.T) {
 
 	resp := registerApp(t, dashURL, "myapp")
 
-	serveMockApp(t, resp.Port1, "v1")
-	putHealth(t, dashURL, "myapp", "healthy", resp.Port1)
+	serveMockApp(t, resp.Ports.Blue, "v1")
+	putHealth(t, dashURL, "myapp", "healthy", resp.Ports.Blue)
 
 	browser := rod.New()
 	r.NoError(browser.Connect())
@@ -98,10 +98,10 @@ func TestDashboardAndProxy(t *testing.T) {
 	a.Contains(tableText, "myapp")
 	a.Contains(tableText, "healthy")
 
-	serveMockApp(t, resp.Port2, "v2")
-	putHealth(t, dashURL, "myapp", "healthy", resp.Port2)
+	serveMockApp(t, resp.Ports.Green, "v2")
+	putHealth(t, dashURL, "myapp", "healthy", resp.Ports.Green)
 
-	page.Timeout(5 * time.Second).MustElementR(".active-port", fmt.Sprintf(":%d", resp.Port2))
+	page.Timeout(5*time.Second).MustElementR(".active-port", fmt.Sprintf(":%d", resp.Ports.Green))
 
 	page.MustScreenshot(filepath.Join(screenshots, "dashboard-after.png"))
 
@@ -130,19 +130,19 @@ func waitForReady(t *testing.T, url string) {
 	t.Fatalf("timeout waiting for %s", url)
 }
 
-func registerApp(t *testing.T, dashURL, space string) api.RegisterResponse {
+func registerApp(t *testing.T, dashURL, space string) api.AppOut {
 	t.Helper()
-	body, _ := json.Marshal(api.RegisterRequest{
-		Config:        []string{".envrc"},
-		Dir:           t.TempDir(),
-		Space:         space,
-		WatchPatterns: []string{"*.go"},
+	body, _ := json.Marshal(api.AppIn{
+		Config: []string{".envrc"},
+		Dir:    t.TempDir(),
+		Space:  space,
+		Watch:  api.Watch{Match: []string{"*.go"}},
 	})
 	resp, err := http.Post(dashURL+"/api/apps", "application/json", bytes.NewReader(body))
 	require.New(t).NoError(err)
 	defer resp.Body.Close()
 	require.New(t).Equal(http.StatusCreated, resp.StatusCode)
-	var result api.RegisterResponse
+	var result api.AppOut
 	require.New(t).NoError(json.NewDecoder(resp.Body).Decode(&result))
 	return result
 }

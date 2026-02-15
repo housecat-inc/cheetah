@@ -1,11 +1,8 @@
 package run
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -15,164 +12,125 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/cockroachdb/errors"
-	"github.com/lmittmann/tint"
-
 	"github.com/housecat-inc/spacecat/pkg/api"
+	"github.com/housecat-inc/spacecat/pkg/build"
 	"github.com/housecat-inc/spacecat/pkg/code"
 	"github.com/housecat-inc/spacecat/pkg/config"
 	"github.com/housecat-inc/spacecat/pkg/deps"
+	"github.com/housecat-inc/spacecat/pkg/logs"
 	"github.com/housecat-inc/spacecat/pkg/pg"
+	"github.com/housecat-inc/spacecat/pkg/port"
 	"github.com/housecat-inc/spacecat/pkg/watch"
 )
 
-const url = "http://spacecat.localhost:50000"
+const defaultURL = "http://spacecat.localhost:50000"
 
-// Run registers with the spacecat dashboard, watches for file changes,
-// and manages a blue/green build/run cycle. It blocks until interrupted.
 func Run(defaults ...map[string]string) {
-	spacecatURL := config.EnvOr("SPACECAT_URL", url)
-	sp, err := code.System()
+	url := config.EnvOr("SPACECAT_URL", defaultURL)
+	space, err := code.System()
 	if err != nil {
 		slog.Error("failed to determine space", "error", err)
 		os.Exit(1)
 	}
 
-	cfg := config.Load(config.DefaultEnv(), sp.Dir, defaults...)
+	cfg := config.Load(config.DefaultEnv(), space.Dir, defaults...)
 
-	logger := slog.New(tint.NewHandler(os.Stderr, &tint.Options{
-		Level:      slog.LevelInfo,
-		TimeFormat: time.Kitchen,
-		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-			if a.Key == slog.LevelKey {
-				return tint.Attr(6, slog.String(slog.LevelKey, "RUN")) // cyan RUN label
-			}
-			return a
-		},
-	})).With("space", sp.Name)
-	slog.SetDefault(logger)
+	l := logs.New(space.Name)
+	slog.SetDefault(l)
 
-	resp, err := register(spacecatURL, api.RegisterRequest{
-		Config:        cfg.Providers,
-		Dir:           sp.Dir,
-		Space:         sp.Name,
-		WatchPatterns: []string{".envrc", "*.go", "*.sql", "go.mod"},
+	client := api.NewClient(url)
+	resp, err := client.AppPost(api.AppIn{
+		Config: cfg.Providers,
+		Dir:    space.Dir,
+		Space:  space.Name,
+		Watch:  api.Watch{Match: []string{".envrc", "*.go", "*.sql", "go.mod"}},
 	})
 	if err != nil {
-		logger.Error("failed to register", "error", err)
+		l.Error("failed to register", "error", err)
 		os.Exit(1)
 	}
-	logger.Info("register", "port1", resp.Port1, "port2", resp.Port2)
+	l.Info("register", "blue", resp.Ports.Blue, "green", resp.Ports.Green)
+
+	ports := port.New(resp.Ports.Blue, resp.Ports.Green, port.DefaultConfig(client, space.Name))
 
 	runner := &appRunner{
-		appEnv:      cfg.Env,
-		cmds:        make(map[int]*exec.Cmd),
-		dir:         sp.Dir,
-		logger:      logger,
-		portActive:  resp.Port1,
-		resp:        resp,
-		space:       sp.Name,
-		spacecatURL: spacecatURL,
+		appEnv: cfg.Env,
+		client: client,
+		cmds:   make(map[int]*exec.Cmd),
+		dir:    space.Dir,
+		logger: l,
+		ports:  ports,
+		resp:   resp,
+		space:  space.Name,
 	}
 
-	// Ensure database (template + clone) before first build
-	if err := runner.ensureDatabase(); err != nil {
-		logger.Error("database setup failed", "error", err)
+	if err := pg.Ensure(resp.DatabaseURL); err != nil {
+		l.Error("database setup failed", "error", err)
 		os.Exit(1)
 	}
 
-	if err := config.Sync(config.DefaultConfig()); err != nil {
-		logger.Warn("config sync failed", "error", err)
+	if err := config.Sync(config.DefaultConfig(), space.Dir); err != nil {
+		l.Warn("config sync failed", "error", err)
 	}
 
 	if err := deps.Sync(deps.DefaultConfig()); err != nil {
-		logger.Warn("deps sync failed", "error", err)
+		l.Warn("deps sync failed", "error", err)
 	}
 
-	if err := runner.buildAndStart(resp.Port1); err != nil {
-		logger.Error("initial build failed", "error", err)
+	if err := runner.start(resp.Ports.Blue); err != nil {
+		l.Error("initial build failed", "error", err)
 		os.Exit(1)
 	}
-	runner.updateHealth("unknown")
 
-	runner.waitForHealthy(resp.Port1)
-	runner.updateHealth("healthy")
+	ports.ReportHealth("unknown")
+	ports.WaitForHealthy(resp.Ports.Blue)
+	ports.ReportHealth("healthy")
 
-	// File watcher
-	w := watch.New(sp.Dir, []string{".envrc", "*.go", "*.sql", "go.mod"}, nil, func(path string) {
+	w := watch.New(space.Dir, []string{".envrc", "*.go", "*.sql", "go.mod"}, nil, func(path string) {
 		runner.rebuild(path)
 	})
 	w.Start()
 
-	// Wait for signal
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	logger.Info("shutting down")
+	l.Info("shutting down")
 	w.Stop()
 	runner.stopAll()
-	deregister(spacecatURL, sp.Name)
+	client.AppDelete(space.Name)
 }
 
 type appRunner struct {
-	appEnv      map[string]string
-	cmds        map[int]*exec.Cmd
-	dir         string
-	logger      *slog.Logger
-	mu          sync.Mutex
-	portActive  int
-	resp        *api.RegisterResponse
-	space       string
-	spacecatURL string
+	appEnv map[string]string
+	client *api.Client
+	cmds   map[int]*exec.Cmd
+	dir    string
+	logger *slog.Logger
+	mu     sync.Mutex
+	ports  *port.Manager
+	resp   *api.AppOut
+	space  string
 }
 
-func (r *appRunner) buildAndStart(port int) error {
+func (r *appRunner) start(port int) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// Build into .spacecat/ (gitignored, watcher-ignored)
-	binPath := filepath.Join(".spacecat", "app")
-	os.MkdirAll(".spacecat", 0o755)
-
-	build := exec.Command("go", "build", "-o", binPath, "./cmd/app")
-	build.Stdout = os.Stdout
-	build.Stderr = os.Stderr
-	build.Env = append(os.Environ(),
-		fmt.Sprintf("DATABASE_URL=%s", r.resp.DatabaseURL),
-	)
-	if err := build.Run(); err != nil {
-		return errors.Wrap(err, "build")
+	out, err := build.Run(build.In{
+		AppEnv:      r.appEnv,
+		DatabaseURL: r.resp.DatabaseURL,
+		Port:        port,
+		Space:       r.space,
+	})
+	if err != nil {
+		return err
 	}
 
-	cmd := exec.Command(binPath)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Env = os.Environ()
-	for k, v := range r.appEnv {
-		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
-	}
-	cmd.Env = append(cmd.Env,
-		fmt.Sprintf("PORT=%d", port),
-		fmt.Sprintf("DATABASE_URL=%s", r.resp.DatabaseURL),
-		fmt.Sprintf("SPACE=%s", r.space),
-	)
-	if err := cmd.Start(); err != nil {
-		return errors.Wrap(err, "run")
-	}
-
-	r.cmds[port] = cmd
-
-	r.logger.Info("server", "port", port, "pid", cmd.Process.Pid)
+	r.cmds[port] = out.Cmd
 	return nil
 }
 
-// rebuild does a zero-downtime blue/green deploy:
-// 1. Run pre-build hooks based on changed file
-// 2. Build + start on the inactive color
-// 3. Wait for the new process to be healthy
-// 4. Swap activeColor (proxy switches)
-// 5. Stop the old process
 func (r *appRunner) rebuild(changedPath string) {
 	if rel, err := filepath.Rel(r.dir, changedPath); err == nil {
 		changedPath = rel
@@ -180,7 +138,7 @@ func (r *appRunner) rebuild(changedPath string) {
 	r.logger.Info("builder")
 
 	if filepath.Base(changedPath) == ".envrc" {
-		if err := config.Sync(config.DefaultConfig()); err != nil {
+		if err := config.Sync(config.DefaultConfig(), r.dir); err != nil {
 			r.logger.Error("config sync failed", "error", err)
 			r.sendLog("error", fmt.Sprintf("config sync failed: %v", err))
 			return
@@ -197,7 +155,7 @@ func (r *appRunner) rebuild(changedPath string) {
 
 	if strings.HasSuffix(changedPath, ".sql") {
 		r.logger.Info("migrator", "path", changedPath)
-		if err := r.ensureDatabase(); err != nil {
+		if err := pg.Ensure(r.resp.DatabaseURL); err != nil {
 			r.logger.Error("database rebuild failed", "error", err)
 			r.sendLog("error", fmt.Sprintf("database rebuild failed: %v", err))
 			return
@@ -212,51 +170,10 @@ func (r *appRunner) rebuild(changedPath string) {
 		}
 	}
 
-	r.mu.Lock()
-	oldPort := r.portActive
-	newPort := r.resp.Port2
-	if oldPort == r.resp.Port2 {
-		newPort = r.resp.Port1
+	if !r.ports.Swap(r.start, r.stopPort) {
+		r.logger.Error("swap failed")
+		r.sendLog("error", "swap failed")
 	}
-	r.mu.Unlock()
-
-	if err := r.buildAndStart(newPort); err != nil {
-		r.logger.Error("build failed", "error", err)
-		r.sendLog("error", fmt.Sprintf("build failed: %v", err))
-		return
-	}
-
-	if !r.waitForHealthy(newPort) {
-		r.logger.Error("health check failed, aborting swap")
-		r.sendLog("error", "health check failed")
-		r.stopPort(newPort)
-		return
-	}
-
-	r.mu.Lock()
-	r.portActive = newPort
-	r.mu.Unlock()
-	r.updateHealth("healthy")
-
-	r.stopPort(oldPort)
-}
-
-// waitForHealthy polls the health endpoint until healthy or timeout.
-func (r *appRunner) waitForHealthy(port int) bool {
-	client := &http.Client{Timeout: 1 * time.Second}
-	url := fmt.Sprintf("http://localhost:%d/health", port)
-
-	for i := 0; i < 30; i++ { // 30 * 500ms = 15s max
-		time.Sleep(500 * time.Millisecond)
-		resp, err := client.Get(url)
-		if err == nil {
-			resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func (r *appRunner) stopPort(port int) {
@@ -279,42 +196,6 @@ func (r *appRunner) stopAll() {
 	}
 }
 
-// ensureDatabase discovers migrations, hashes them, creates/updates the
-// template DB, and clones it to the app's database.
-func (r *appRunner) ensureDatabase() error {
-	migDirs, err := pg.MigrationDirs(".")
-	if err != nil {
-		return nil // no migrations, skip silently
-	}
-
-	hash, err := pg.Hash(migDirs)
-	if err != nil {
-		return errors.Wrap(err, "hash migrations")
-	}
-
-	adminURL, err := pg.AdminURL(r.resp.DatabaseURL)
-	if err != nil {
-		return errors.Wrap(err, "admin url")
-	}
-
-	tmplName, err := pg.Template(adminURL, migDirs, hash)
-	if err != nil {
-		return errors.Wrap(err, "ensure template")
-	}
-
-	appDBName, err := pg.DBName(r.resp.DatabaseURL)
-	if err != nil {
-		return errors.Wrap(err, "db name")
-	}
-
-	if err := pg.Create(adminURL, tmplName, appDBName); err != nil {
-		return errors.Wrap(err, "clone db")
-	}
-
-	r.logger.Info("database", "template", tmplName, "database_url", r.resp.DatabaseURL)
-	return nil
-}
-
 func stopProcess(cmd *exec.Cmd) {
 	if cmd == nil || cmd.Process == nil {
 		return
@@ -333,53 +214,10 @@ func stopProcess(cmd *exec.Cmd) {
 	}
 }
 
-func (r *appRunner) updateHealth(status string) {
-	r.mu.Lock()
-	port := r.portActive
-	r.mu.Unlock()
-
-	body, _ := json.Marshal(map[string]any{
-		"status":      status,
-		"port_active": port,
-	})
-	url := fmt.Sprintf("%s/api/apps/%s/health", r.spacecatURL, r.space)
-	req, _ := http.NewRequest(http.MethodPut, url, bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	http.DefaultClient.Do(req)
-}
-
 func (r *appRunner) sendLog(level, message string) {
-	entries := []api.LogEntry{{
-		Timestamp: time.Now(),
+	r.client.LogPost(r.space, []api.Log{{
 		Level:     level,
 		Message:   message,
-	}}
-	body, _ := json.Marshal(entries)
-	url := fmt.Sprintf("%s/api/apps/%s/logs", r.spacecatURL, r.space)
-	http.Post(url, "application/json", bytes.NewReader(body))
-}
-
-func register(spacecatURL string, req api.RegisterRequest) (*api.RegisterResponse, error) {
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, errors.Wrap(err, "marshal")
-	}
-	resp, err := http.Post(spacecatURL+"/api/apps", "application/json", bytes.NewReader(body))
-	if err != nil {
-		return nil, errors.Wrap(err, "post")
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		return nil, errors.Newf("register failed: %s", resp.Status)
-	}
-	var result api.RegisterResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, errors.Wrap(err, "decode")
-	}
-	return &result, nil
-}
-
-func deregister(spacecatURL, space string) {
-	req, _ := http.NewRequest(http.MethodDelete, spacecatURL+"/api/apps/"+space, nil)
-	http.DefaultClient.Do(req)
+		Timestamp: time.Now(),
+	}})
 }
