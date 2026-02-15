@@ -13,17 +13,19 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
-	embeddedpostgres "github.com/fergusstrange/embedded-postgres"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
+	"github.com/lmittmann/tint"
 
 	"github.com/housecat-inc/spacecat/pkg/api"
+	"github.com/housecat-inc/spacecat/pkg/postgres"
 )
 
 const (
@@ -34,30 +36,31 @@ const (
 )
 
 func main() {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger := slog.New(tint.NewHandler(os.Stderr, &tint.Options{Level: slog.LevelInfo, TimeFormat: time.Kitchen}))
 	slog.SetDefault(logger)
 
 	reg := newRegistry(logger)
 
-	// Start embedded postgres
-	pg := embeddedpostgres.NewDatabase(
-		embeddedpostgres.DefaultConfig().
-			Port(postgresPort).
-			Logger(os.Stderr),
-	)
-	if err := pg.Start(); err != nil {
-		logger.Error("failed to start embedded postgres", "error", err)
+	// Ensure postgres is running (shared daemon, not stopped on shutdown)
+	pgURL, err := postgres.EnsureRunning()
+	if err != nil {
+		logger.Error("failed to ensure postgres", "error", err)
 		os.Exit(1)
 	}
 	reg.mu.Lock()
 	reg.postgresRunning = true
-	reg.postgresURL = fmt.Sprintf("postgres://localhost:%d/postgres?sslmode=disable", postgresPort)
+	reg.postgresURL = pgURL
 	reg.mu.Unlock()
-	logger.Info("embedded postgres started", "port", postgresPort)
+
+	// Load persisted state if available
+	stateFile := filepath.Join(".spacecat", "state.json")
+	os.MkdirAll(".spacecat", 0o755)
+	reg.loadState(stateFile)
 
 	// Start Echo
 	e := echo.New()
 	e.HideBanner = true
+	e.HidePort = true
 	e.Use(middleware.Recover())
 	e.Use(middleware.RequestLoggerWithConfig(middleware.RequestLoggerConfig{
 		LogStatus:   true,
@@ -66,8 +69,8 @@ func main() {
 		LogLatency:  true,
 		HandleError: true,
 		LogValuesFunc: func(c echo.Context, v middleware.RequestLoggerValues) error {
-			if strings.HasPrefix(v.URI, "/_spaces/api/events") {
-				return nil // don't log SSE connections
+			if extractSubdomain(c.Request().Host) == "spacecat" {
+				return nil // don't log dashboard/API requests
 			}
 			logger.Info("request",
 				"method", v.Method,
@@ -78,28 +81,34 @@ func main() {
 		},
 	}))
 
-	// Dashboard and API under /_spaces/
-	s := e.Group("/_spaces")
-	s.GET("/", reg.handleDashboard)
-	s.GET("/api/status", reg.handleStatus)
-	s.GET("/api/apps", reg.handleListApps)
-	s.POST("/api/apps", reg.handleRegisterApp)
-	s.GET("/api/apps/:space", reg.handleGetApp)
-	s.DELETE("/api/apps/:space", reg.handleDeregisterApp)
-	s.POST("/api/apps/:space/logs", reg.handleAppendLogs)
-	s.PUT("/api/apps/:space/health", reg.handleUpdateHealth)
-	s.GET("/api/events", reg.handleSSE)
+	// Host-based routing: non-spacecat hosts go to reverse proxy
+	e.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			if extractSubdomain(c.Request().Host) != "spacecat" {
+				return reg.handleProxy(c)
+			}
+			return next(c)
+		}
+	})
 
-	// Status bubble JS
-	e.GET("/_spaces.js", reg.handleSpacesJS)
+	// Dashboard and API (served on spacecat.localhost)
+	e.GET("/", reg.handleDashboard)
+	e.GET("/api/status", reg.handleStatus)
+	e.GET("/api/apps", reg.handleListApps)
+	e.POST("/api/apps", reg.handleRegisterApp)
+	e.GET("/api/apps/:space", reg.handleGetApp)
+	e.DELETE("/api/apps/:space", reg.handleDeregisterApp)
+	e.POST("/api/apps/:space/logs", reg.handleAppendLogs)
+	e.PUT("/api/apps/:space/health", reg.handleUpdateHealth)
+	e.GET("/api/events", reg.handleSSE)
+	e.GET("/spaces.js", reg.handleSpacesJS)
 
-	// Reverse proxy catch-all — must be last
-	e.Any("/*", reg.handleProxy)
-	e.Any("/", reg.handleProxy)
+	// Periodic state save
+	go reg.periodicSave(stateFile, 5*time.Second)
 
 	go func() {
 		addr := fmt.Sprintf(":%d", dashboardPort)
-		logger.Info("starting spacecat", "addr", addr)
+		logger.Info("spacecat", "url", fmt.Sprintf("http://spacecat.localhost:%d", dashboardPort))
 		if err := e.Start(addr); err != nil && err != http.ErrServerClosed {
 			logger.Error("server error", "error", err)
 		}
@@ -117,9 +126,7 @@ func main() {
 	if err := e.Shutdown(ctx); err != nil {
 		logger.Error("server shutdown error", "error", err)
 	}
-	if err := pg.Stop(); err != nil {
-		logger.Error("postgres shutdown error", "error", err)
-	}
+	reg.saveState(stateFile)
 	logger.Info("shutdown complete")
 }
 
@@ -128,7 +135,7 @@ type registry struct {
 	mu              sync.RWMutex
 	apps            map[string]*api.App
 	lastRegistered  string
-	nextBluePort    int
+	nextPort1       int
 	postgresRunning bool
 	postgresURL     string
 	startTime       time.Time
@@ -142,7 +149,7 @@ type registry struct {
 func newRegistry(logger *slog.Logger) *registry {
 	return &registry{
 		apps:          make(map[string]*api.App),
-		nextBluePort:  bluePortStart,
+		nextPort1:     bluePortStart,
 		startTime:     time.Now(),
 		logger:        logger,
 		subscribers:   make(map[chan []byte]struct{}),
@@ -182,28 +189,29 @@ func (r *registry) unsubscribe(ch chan []byte) {
 	close(ch)
 }
 
-func (r *registry) register(req api.RegisterRequest) (*api.App, error) {
+// register returns the app and whether it already existed.
+func (r *registry) register(req api.RegisterRequest) (*api.App, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if _, exists := r.apps[req.Space]; exists {
-		return nil, fmt.Errorf("space %q already registered", req.Space)
+	if existing, exists := r.apps[req.Space]; exists {
+		r.lastRegistered = req.Space
+		return existing, true
 	}
 
-	blue := r.nextBluePort
-	green := r.nextBluePort + 1
-	r.nextBluePort += 2
+	p1 := r.nextPort1
+	p2 := r.nextPort1 + 1
+	r.nextPort1 += 2
 
 	app := &api.App{
-		Space:          req.Space,
-		Dir:            req.Dir,
-		ConfigFile:     req.ConfigFile,
-		TemplateDBURL:  fmt.Sprintf("postgres://localhost:%d/t_%s?sslmode=disable", postgresPort, req.Space),
-		DatabaseURL:    fmt.Sprintf("postgres://localhost:%d/%s?sslmode=disable", postgresPort, req.Space),
-		WatchPatterns:  req.WatchPatterns,
-		IgnorePatterns: req.IgnorePatterns,
-		BluePort:       blue,
-		GreenPort:      green,
+		Space:            req.Space,
+		Dir:              req.Dir,
+		ConfigFile:       req.ConfigFile,
+		DatabaseURL:      fmt.Sprintf("postgres://postgres:postgres@localhost:%d/%s?sslmode=disable", postgresPort, req.Space),
+		WatchPatterns:    req.WatchPatterns,
+		IgnorePatterns:   req.IgnorePatterns,
+		Port1:            p1,
+		Port2:            p2,
 		ActiveColor:    "blue",
 		HealthStatus:   "unknown",
 		RecentLogs:     make([]api.LogEntry, 0),
@@ -211,7 +219,7 @@ func (r *registry) register(req api.RegisterRequest) (*api.App, error) {
 	}
 	r.apps[req.Space] = app
 	r.lastRegistered = req.Space
-	return app, nil
+	return app, false
 }
 
 func (r *registry) get(space string) (*api.App, bool) {
@@ -262,9 +270,9 @@ func (r *registry) activeTarget() (space string, port int, ok bool) {
 	}
 
 	if app.ActiveColor == "green" {
-		return app.Space, app.GreenPort, true
+		return app.Space, app.Port2, true
 	}
-	return app.Space, app.BluePort, true
+	return app.Space, app.Port1, true
 }
 
 // extractSubdomain pulls the subdomain from a Host header like "greet.localhost:8080".
@@ -281,15 +289,15 @@ func extractSubdomain(host string) string {
 
 // targetForRequest resolves routing: subdomain match first, then lastRegistered.
 func (r *registry) targetForRequest(host string) (space string, port int, ok bool) {
-	if sub := extractSubdomain(host); sub != "" {
+	if sub := extractSubdomain(host); sub != "" && sub != "spacecat" {
 		r.mu.RLock()
 		app, exists := r.apps[sub]
 		r.mu.RUnlock()
 		if exists {
 			if app.ActiveColor == "green" {
-				return app.Space, app.GreenPort, true
+				return app.Space, app.Port2, true
 			}
-			return app.Space, app.BluePort, true
+			return app.Space, app.Port1, true
 		}
 	}
 	return r.activeTarget()
@@ -355,20 +363,21 @@ func (r *registry) handleRegisterApp(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "space is required"})
 	}
 
-	app, err := r.register(req)
-	if err != nil {
-		return c.JSON(http.StatusConflict, map[string]string{"error": err.Error()})
-	}
+	app, existed := r.register(req)
 
-	r.logger.Info("app registered", "space", app.Space)
+	r.logger.Info("register", "space", app.Space, "existed", existed)
 	r.broadcast("app", app)
 
-	return c.JSON(http.StatusCreated, api.RegisterResponse{
-		Space:         app.Space,
-		BluePort:      app.BluePort,
-		GreenPort:     app.GreenPort,
-		TemplateDBURL: app.TemplateDBURL,
-		DatabaseURL:   app.DatabaseURL,
+	status := http.StatusCreated
+	if existed {
+		status = http.StatusOK
+	}
+
+	return c.JSON(status, api.RegisterResponse{
+		Space:            app.Space,
+		Port1:            app.Port1,
+		Port2:            app.Port2,
+		DatabaseURL:      app.DatabaseURL,
 	})
 }
 
@@ -385,7 +394,7 @@ func (r *registry) handleDeregisterApp(c echo.Context) error {
 	if !r.deregister(space) {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "not found"})
 	}
-	r.logger.Info("app deregistered", "space", space)
+	r.logger.Info("deregister", "space", space)
 	r.broadcast("deregister", map[string]string{"space": space})
 	return c.NoContent(http.StatusNoContent)
 }
@@ -430,6 +439,7 @@ func (r *registry) handleSSE(c echo.Context) error {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.WriteHeader(http.StatusOK)
 
 	// Send current state immediately
@@ -461,7 +471,7 @@ func (r *registry) handleSSE(c echo.Context) error {
 func (r *registry) handleProxy(c echo.Context) error {
 	space, port, ok := r.targetForRequest(c.Request().Host)
 	if !ok {
-		return c.Redirect(http.StatusTemporaryRedirect, "/_spaces/")
+		return c.Redirect(http.StatusTemporaryRedirect, fmt.Sprintf("http://spacecat.localhost:%d/", dashboardPort))
 	}
 
 	target, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", port))
@@ -485,7 +495,7 @@ func (r *registry) handleProxy(c echo.Context) error {
 			injected := strings.Replace(
 				string(body),
 				"</body>",
-				fmt.Sprintf(`<script src="/_spaces.js" data-space="%s" data-port="%d"></script>`+"\n</body>", space, port),
+				fmt.Sprintf(`<script src="//spacecat.localhost:%d/spaces.js" data-space="%s" data-port="%d"></script>`+"\n</body>", dashboardPort, space, port),
 				1,
 			)
 			resp.Body = io.NopCloser(bytes.NewReader([]byte(injected)))
@@ -557,6 +567,8 @@ const spacesJS = `(function() {
   const label = el.querySelector(".__sc-label");
   label.textContent = space + " :" + initialPort;
 
+  if (space === "spacecat") dot.className = "__sc-dot healthy";
+
   let allApps = {};
   let menuOpen = false;
 
@@ -578,7 +590,7 @@ const spacesJS = `(function() {
     const list = Object.values(allApps);
     let h = "";
     for (const a of list) {
-      const p = a.active_color === "green" ? a.green_port : a.blue_port;
+      const p = a.active_color === "green" ? a.port2 : a.port1;
       const active = a.space === space ? " active" : "";
       const href = location.protocol + "//" + a.space + ".localhost:" + location.port + "/";
       h += '<a class="__sc-item' + active + '" href="' + href + '">' +
@@ -586,8 +598,11 @@ const spacesJS = `(function() {
         a.space +
         '<span class="info">:' + p + '</span></a>';
     }
-    h += '<div class="__sc-sep"></div>';
-    h += '<a class="__sc-item" href="/_spaces/" target="_blank">Dashboard</a>';
+    if (list.length > 0) h += '<div class="__sc-sep"></div>';
+    const scActive = space === "spacecat" ? " active" : "";
+    h += '<a class="__sc-item' + scActive + '" href="//spacecat.localhost:' + location.port + '/">' +
+      '<span class="__sc-dot healthy"></span>spacecat' +
+      '<span class="info">:' + location.port + '</span></a>';
     menu.innerHTML = h;
   }
 
@@ -602,7 +617,7 @@ const spacesJS = `(function() {
     if (app.space !== space) return;
 
     dot.className = "__sc-dot " + app.health_status;
-    const p = app.active_color === "green" ? app.green_port : app.blue_port;
+    const p = app.active_color === "green" ? app.port2 : app.port1;
     label.textContent = app.space + " :" + p;
 
     if (String(p) !== lastPort && app.health_status === "healthy" && !reloading) {
@@ -613,7 +628,7 @@ const spacesJS = `(function() {
     lastPort = String(p);
   }
 
-  const es = new EventSource("/_spaces/api/events");
+  const es = new EventSource("//spacecat.localhost:" + location.port + "/api/events");
 
   es.addEventListener("init", function(e) {
     const apps = JSON.parse(e.data);
@@ -669,6 +684,7 @@ var dashboardTmpl = template.Must(template.New("dashboard").Parse(`<!DOCTYPE htm
   .healthy { color: #4ade80; }
   .unhealthy { color: #ef4444; }
   .unknown { color: #888; }
+  .active-port { color: #4ade80; font-weight: 600; }
   a { color: #7dd3fc; text-decoration: none; }
   a:hover { text-decoration: underline; }
   code { background: #1a1a2e; padding: 2px 6px; border-radius: 4px; font-size: 0.85rem; }
@@ -696,18 +712,18 @@ var dashboardTmpl = template.Must(template.New("dashboard").Parse(`<!DOCTYPE htm
       return;
     }
     let h = '<table><thead><tr>' +
-      '<th>Space</th><th>Config</th><th>Template DB</th>' +
-      '<th>Blue</th><th>Green</th><th>Active</th>' +
+      '<th>Space</th><th>Config</th>' +
+      '<th>Port1</th><th>Port2</th>' +
       '<th>Health</th><th>Watch</th><th>Logs</th></tr></thead><tbody>';
     for (const a of list) {
       const watch = (a.watch_patterns || []).map(p => '<code>' + p + '</code>').join(' ');
+      const p1cls = a.active_color === 'blue' ? ' class="active-port"' : '';
+      const p2cls = a.active_color === 'green' ? ' class="active-port"' : '';
       h += '<tr>' +
         '<td><strong><a href="' + location.protocol + '//' + a.space + '.localhost:' + location.port + '/">' + a.space + '</a></strong></td>' +
         '<td><code>' + (a.config_file || '') + '</code></td>' +
-        '<td><code>' + (a.template_db_url || '') + '</code></td>' +
-        '<td>:' + a.blue_port + '</td>' +
-        '<td>:' + a.green_port + '</td>' +
-        '<td>' + a.active_color + '</td>' +
+        '<td' + p1cls + '>:' + a.port1 + '</td>' +
+        '<td' + p2cls + '>:' + a.port2 + '</td>' +
         '<td class="' + a.health_status + '">' + a.health_status + '</td>' +
         '<td>' + watch + '</td>' +
         '<td>' + (a.recent_logs || []).length + '</td></tr>';
@@ -716,7 +732,7 @@ var dashboardTmpl = template.Must(template.New("dashboard").Parse(`<!DOCTYPE htm
     table.innerHTML = h;
   }
 
-  const es = new EventSource("/_spaces/api/events");
+  const es = new EventSource("/api/events");
 
   es.addEventListener("init", function(e) {
     const list = JSON.parse(e.data);
@@ -741,6 +757,7 @@ var dashboardTmpl = template.Must(template.New("dashboard").Parse(`<!DOCTYPE htm
   render();
 })();
 </script>
+<script src="/spaces.js" data-space="spacecat" data-port="{{.Port}}"></script>
 </body>
 </html>`))
 
@@ -748,9 +765,128 @@ func (r *registry) handleDashboard(c echo.Context) error {
 	data := struct {
 		Status api.Status
 		Apps   []*api.App
+		Port   int
 	}{
 		Status: r.status(),
 		Apps:   r.list(),
+		Port:   dashboardPort,
 	}
 	return dashboardTmpl.Execute(c.Response().Writer, data)
+}
+
+// State persistence
+
+type registryState struct {
+	Apps           map[string]*api.App `json:"apps"`
+	NextPort1      int                 `json:"next_port1"`
+	LastRegistered string              `json:"last_registered"`
+}
+
+func (r *registry) saveState(path string) {
+	r.mu.RLock()
+	state := registryState{
+		Apps:           r.apps,
+		NextPort1:      r.nextPort1,
+		LastRegistered: r.lastRegistered,
+	}
+	r.mu.RUnlock()
+
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		r.logger.Warn("failed to marshal state", "error", err)
+		return
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		r.logger.Warn("failed to write state", "error", err)
+		return
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		r.logger.Warn("failed to rename state file", "error", err)
+	}
+}
+
+func (r *registry) loadState(path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return // no state file, start fresh
+	}
+	var state registryState
+	if err := json.Unmarshal(data, &state); err != nil {
+		r.logger.Warn("failed to parse state file, starting fresh", "error", err)
+		return
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.apps = state.Apps
+	r.nextPort1 = state.NextPort1
+	if r.nextPort1 < bluePortStart {
+		r.nextPort1 = bluePortStart
+	}
+	// Don't restore lastRegistered — no apps are running yet, so the
+	// proxy should show the dashboard until an app actually registers.
+	r.lastRegistered = ""
+
+	if r.apps == nil {
+		r.apps = make(map[string]*api.App)
+	}
+	for _, app := range r.apps {
+		app.HealthStatus = "unknown"
+		// Fix apps from old state with missing ports
+		if app.Port1 < bluePortStart {
+			app.Port1 = r.nextPort1
+			app.Port2 = r.nextPort1 + 1
+			r.nextPort1 += 2
+		}
+	}
+
+	r.logger.Info("state", "apps", len(r.apps))
+
+	// Probe health of loaded apps in background
+	go r.probeHealth()
+}
+
+// probeHealth checks each app's health endpoint and updates status.
+// Apps that respond healthy get routed to immediately.
+func (r *registry) probeHealth() {
+	client := &http.Client{Timeout: 1 * time.Second}
+
+	r.mu.RLock()
+	apps := make([]*api.App, 0, len(r.apps))
+	for _, app := range r.apps {
+		apps = append(apps, app)
+	}
+	r.mu.RUnlock()
+
+	for _, app := range apps {
+		port := app.Port1
+		if app.ActiveColor == "green" {
+			port = app.Port2
+		}
+		resp, err := client.Get(fmt.Sprintf("http://localhost:%d/health", port))
+		if err != nil {
+			continue
+		}
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			r.mu.Lock()
+			app.HealthStatus = "healthy"
+			app.LastHealthCheck = time.Now()
+			if r.lastRegistered == "" {
+				r.lastRegistered = app.Space
+			}
+			r.mu.Unlock()
+			r.logger.Info("probe", "space", app.Space, "status", "healthy", "port", port)
+			r.broadcast("app", app)
+		}
+	}
+}
+
+func (r *registry) periodicSave(path string, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for range ticker.C {
+		r.saveState(path)
+	}
 }

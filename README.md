@@ -25,6 +25,10 @@ Conventions over configuration:
 - logs: `slog`
 - admin processes: `go test`, `go run ./cmd/app db migrate`
 
+## Development
+
+Run `go run main.go` to run the proxy in development mode with live reload.
+
 ## Roadmap
 
 - [ ] Internet gateway

@@ -9,46 +9,55 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/lmittmann/tint"
+
 	"github.com/housecat-inc/spacecat/pkg/api"
+	"github.com/housecat-inc/spacecat/pkg/db"
 	"github.com/housecat-inc/spacecat/pkg/watch"
 )
 
-const defaultSpacecatURL = "http://localhost:50000"
+const defaultSpacecatURL = "http://spacecat.localhost:50000"
 
 // Run registers with the spacecat dashboard, watches for file changes,
 // and manages a blue/green build/run cycle. It blocks until interrupted.
 func Run() {
-	logger := slog.Default()
-
 	spacecatURL := envOr("SPACECAT_URL", defaultSpacecatURL)
 	space, err := determineSpace()
 	if err != nil {
-		logger.Error("failed to determine space", "error", err)
+		slog.Error("failed to determine space", "error", err)
 		os.Exit(1)
 	}
 
+	logger := slog.New(tint.NewHandler(os.Stderr, &tint.Options{
+		Level:      slog.LevelInfo,
+		TimeFormat: time.Kitchen,
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.LevelKey {
+				return tint.Attr(6, slog.String(slog.LevelKey, "RUN")) // cyan RUN label
+			}
+			return a
+		},
+	})).With("space", space)
+	slog.SetDefault(logger)
+
 	dir, _ := os.Getwd()
-	logger.Info("registering with spacecat", "space", space, "url", spacecatURL, "dir", dir)
 	resp, err := register(spacecatURL, api.RegisterRequest{
 		Space:         space,
 		Dir:           dir,
 		ConfigFile:    ".envrc",
-		WatchPatterns: []string{"*.go"},
+		WatchPatterns: []string{"*.go", "go.mod", "*.sql"},
 	})
 	if err != nil {
 		logger.Error("failed to register", "error", err)
 		os.Exit(1)
 	}
-	logger.Info("registered",
-		"blue_port", resp.BluePort,
-		"green_port", resp.GreenPort,
-		"database_url", resp.DatabaseURL,
-	)
+	logger.Info("register", "port1", resp.Port1, "port2", resp.Port2)
 
 	runner := &appRunner{
 		spacecatURL: spacecatURL,
@@ -56,6 +65,22 @@ func Run() {
 		resp:        resp,
 		activeColor: "blue",
 		logger:      logger,
+	}
+
+	// Ensure database (template + clone) before first build
+	if err := runner.ensureDatabase(); err != nil {
+		logger.Error("database setup failed", "error", err)
+		os.Exit(1)
+	}
+
+	// Run go generate if sqlc config exists
+	if db.HasSqlcConfig(".") {
+		gen := exec.Command("go", "generate", "./...")
+		gen.Stdout = os.Stdout
+		gen.Stderr = os.Stderr
+		if err := gen.Run(); err != nil {
+			logger.Warn("go generate failed", "error", err)
+		}
 	}
 
 	// Initial build + run on blue
@@ -70,9 +95,8 @@ func Run() {
 	runner.updateHealth("healthy")
 
 	// File watcher
-	w := watch.New(dir, []string{"*.go"}, nil, func(path string) {
-		logger.Info("file changed, rebuilding", "path", path)
-		runner.rebuild()
+	w := watch.New(dir, []string{"*.go", "go.mod", "*.sql"}, nil, func(path string) {
+		runner.rebuild(path)
 	})
 	w.Start()
 
@@ -100,9 +124,9 @@ type appRunner struct {
 
 func (r *appRunner) portForColor(color string) int {
 	if color == "green" {
-		return r.resp.GreenPort
+		return r.resp.Port2
 	}
-	return r.resp.BluePort
+	return r.resp.Port1
 }
 
 // buildAndStart builds the binary and starts it on the given color's port.
@@ -113,26 +137,27 @@ func (r *appRunner) buildAndStart(color string) error {
 
 	port := r.portForColor(color)
 
-	// Build
-	build := exec.Command("go", "build", "-o", "./app", "./cmd/app")
+	// Build into .spacecat/ (gitignored, watcher-ignored)
+	binPath := filepath.Join(".spacecat", "app")
+	os.MkdirAll(".spacecat", 0o755)
+
+	build := exec.Command("go", "build", "-o", binPath, "./cmd/app")
 	build.Stdout = os.Stdout
 	build.Stderr = os.Stderr
 	build.Env = append(os.Environ(),
 		fmt.Sprintf("DATABASE_URL=%s", r.resp.DatabaseURL),
-		fmt.Sprintf("DATABASE_TEMPLATE_URL=%s", r.resp.TemplateDBURL),
 	)
 	if err := build.Run(); err != nil {
 		return fmt.Errorf("build: %w", err)
 	}
 
 	// Run
-	cmd := exec.Command("./app")
+	cmd := exec.Command(binPath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Env = append(os.Environ(),
 		fmt.Sprintf("PORT=%d", port),
 		fmt.Sprintf("DATABASE_URL=%s", r.resp.DatabaseURL),
-		fmt.Sprintf("DATABASE_TEMPLATE_URL=%s", r.resp.TemplateDBURL),
 		fmt.Sprintf("SPACE=%s", r.space),
 	)
 	if err := cmd.Start(); err != nil {
@@ -145,16 +170,53 @@ func (r *appRunner) buildAndStart(color string) error {
 		r.blueCmd = cmd
 	}
 
-	r.logger.Info("app started", "port", port, "color", color, "pid", cmd.Process.Pid)
+	r.logger.Info("server", "port", port, "pid", cmd.Process.Pid)
 	return nil
 }
 
 // rebuild does a zero-downtime blue/green deploy:
-// 1. Build + start on the inactive color
-// 2. Wait for the new process to be healthy
-// 3. Swap activeColor (proxy switches)
-// 4. Stop the old process
-func (r *appRunner) rebuild() {
+// 1. Run pre-build hooks based on changed file
+// 2. Build + start on the inactive color
+// 3. Wait for the new process to be healthy
+// 4. Swap activeColor (proxy switches)
+// 5. Stop the old process
+func (r *appRunner) rebuild(changedPath string) {
+	if cwd, err := os.Getwd(); err == nil {
+		if rel, err := filepath.Rel(cwd, changedPath); err == nil {
+			changedPath = rel
+		}
+	}
+	r.logger.Info("builder")
+
+	// Pre-build hooks
+	if filepath.Base(changedPath) == "go.mod" {
+		tidy := exec.Command("go", "mod", "tidy")
+		tidy.Stdout = os.Stdout
+		tidy.Stderr = os.Stderr
+		if err := tidy.Run(); err != nil {
+			r.logger.Error("go mod tidy failed", "error", err)
+			r.sendLog("error", fmt.Sprintf("go mod tidy failed: %v", err))
+			return
+		}
+	}
+
+	if strings.HasSuffix(changedPath, ".sql") {
+		r.logger.Info("migrator", "path", changedPath)
+		if err := r.ensureDatabase(); err != nil {
+			r.logger.Error("database rebuild failed", "error", err)
+			r.sendLog("error", fmt.Sprintf("database rebuild failed: %v", err))
+			return
+		}
+		if db.HasSqlcConfig(".") {
+			gen := exec.Command("go", "generate", "./...")
+			gen.Stdout = os.Stdout
+			gen.Stderr = os.Stderr
+			if err := gen.Run(); err != nil {
+				r.logger.Warn("go generate failed", "error", err)
+			}
+		}
+	}
+
 	r.mu.Lock()
 	oldColor := r.activeColor
 	newColor := "green"
@@ -163,20 +225,18 @@ func (r *appRunner) rebuild() {
 	}
 	r.mu.Unlock()
 
-	r.logger.Info("blue/green deploy", "old", oldColor, "new", newColor)
-
 	// Build + start new
 	if err := r.buildAndStart(newColor); err != nil {
-		r.logger.Error("rebuild failed", "error", err)
-		r.sendLog("error", fmt.Sprintf("rebuild failed: %v", err))
+		r.logger.Error("build failed", "error", err)
+		r.sendLog("error", fmt.Sprintf("build failed: %v", err))
 		return
 	}
 
 	// Wait for new to be healthy
 	newPort := r.portForColor(newColor)
 	if !r.waitForHealthy(newPort) {
-		r.logger.Error("new process failed health check, aborting swap")
-		r.sendLog("error", "new process failed health check")
+		r.logger.Error("health check failed, aborting swap")
+		r.sendLog("error", "health check failed")
 		r.stopColor(newColor)
 		return
 	}
@@ -186,7 +246,6 @@ func (r *appRunner) rebuild() {
 	r.activeColor = newColor
 	r.mu.Unlock()
 	r.updateHealth("healthy")
-	r.logger.Info("swapped", "active", newColor, "port", newPort)
 
 	// Stop old
 	r.stopColor(oldColor)
@@ -237,6 +296,42 @@ func (r *appRunner) stopAll() {
 	stopProcess(green)
 }
 
+// ensureDatabase discovers migrations, hashes them, creates/updates the
+// template DB, and clones it to the app's database.
+func (r *appRunner) ensureDatabase() error {
+	migDir, err := db.FindMigrationDir(".")
+	if err != nil {
+		return nil // no migrations, skip silently
+	}
+
+	hash, err := db.HashMigrations(migDir)
+	if err != nil {
+		return fmt.Errorf("hash migrations: %w", err)
+	}
+
+	adminURL, err := db.AdminURL(r.resp.DatabaseURL)
+	if err != nil {
+		return fmt.Errorf("admin url: %w", err)
+	}
+
+	tmplName, err := db.EnsureTemplate(adminURL, migDir, hash)
+	if err != nil {
+		return fmt.Errorf("ensure template: %w", err)
+	}
+
+	appDBName, err := db.DBNameFromURL(r.resp.DatabaseURL)
+	if err != nil {
+		return fmt.Errorf("db name: %w", err)
+	}
+
+	if err := db.CloneDB(adminURL, tmplName, appDBName); err != nil {
+		return fmt.Errorf("clone db: %w", err)
+	}
+
+	r.logger.Info("database", "template", tmplName, "database_url", r.resp.DatabaseURL)
+	return nil
+}
+
 func stopProcess(cmd *exec.Cmd) {
 	if cmd == nil || cmd.Process == nil {
 		return
@@ -264,7 +359,7 @@ func (r *appRunner) updateHealth(status string) {
 		"status":       status,
 		"active_color": color,
 	})
-	url := fmt.Sprintf("%s/_spaces/api/apps/%s/health", r.spacecatURL, r.space)
+	url := fmt.Sprintf("%s/api/apps/%s/health", r.spacecatURL, r.space)
 	req, _ := http.NewRequest(http.MethodPut, url, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	http.DefaultClient.Do(req)
@@ -277,7 +372,7 @@ func (r *appRunner) sendLog(level, message string) {
 		Message:   message,
 	}}
 	body, _ := json.Marshal(entries)
-	url := fmt.Sprintf("%s/_spaces/api/apps/%s/logs", r.spacecatURL, r.space)
+	url := fmt.Sprintf("%s/api/apps/%s/logs", r.spacecatURL, r.space)
 	http.Post(url, "application/json", bytes.NewReader(body))
 }
 
@@ -304,12 +399,12 @@ func register(spacecatURL string, req api.RegisterRequest) (*api.RegisterRespons
 	if err != nil {
 		return nil, err
 	}
-	resp, err := http.Post(spacecatURL+"/_spaces/api/apps", "application/json", bytes.NewReader(body))
+	resp, err := http.Post(spacecatURL+"/api/apps", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusCreated {
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("register failed: %s", resp.Status)
 	}
 	var result api.RegisterResponse
@@ -320,7 +415,7 @@ func register(spacecatURL string, req api.RegisterRequest) (*api.RegisterRespons
 }
 
 func deregister(spacecatURL, space string) {
-	req, _ := http.NewRequest(http.MethodDelete, spacecatURL+"/_spaces/api/apps/"+space, nil)
+	req, _ := http.NewRequest(http.MethodDelete, spacecatURL+"/api/apps/"+space, nil)
 	http.DefaultClient.Do(req)
 }
 
