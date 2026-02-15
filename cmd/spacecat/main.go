@@ -25,14 +25,16 @@ import (
 	"github.com/lmittmann/tint"
 
 	"github.com/housecat-inc/spacecat/pkg/api"
-	"github.com/housecat-inc/spacecat/pkg/postgres"
+	"github.com/housecat-inc/spacecat/pkg/config"
+	"github.com/housecat-inc/spacecat/pkg/pg"
 )
 
-const (
-	dashboardPort = 50000
-	postgresPort  = 54320
-	bluePortStart = 4000
-	maxRecentLogs  = 100
+const maxRecentLogs = 100
+
+var (
+	bluePortStart = config.EnvOrInt("APP_PORT", 4000)
+	dashboardPort = config.EnvOrInt("PORT", 50000)
+	postgresPort  = config.EnvOrInt("PG_PORT", 54320)
 )
 
 func main() {
@@ -41,8 +43,8 @@ func main() {
 
 	reg := newRegistry(logger)
 
-	// Ensure postgres is running (shared daemon, not stopped on shutdown)
-	pgURL, err := postgres.EnsureRunning()
+	// Ensure postgres is running
+	pgURL, err := pg.Run()
 	if err != nil {
 		logger.Error("failed to ensure postgres", "error", err)
 		os.Exit(1)
@@ -127,6 +129,7 @@ func main() {
 		logger.Error("server shutdown error", "error", err)
 	}
 	reg.saveState(stateFile)
+	pg.Stop(postgresPort)
 	logger.Info("shutdown complete")
 }
 
@@ -148,11 +151,11 @@ type registry struct {
 
 func newRegistry(logger *slog.Logger) *registry {
 	return &registry{
-		apps:          make(map[string]*api.App),
-		nextPort1:     bluePortStart,
-		startTime:     time.Now(),
-		logger:        logger,
-		subscribers:   make(map[chan []byte]struct{}),
+		apps:        make(map[string]*api.App),
+		nextPort1:   bluePortStart,
+		startTime:   time.Now(),
+		logger:      logger,
+		subscribers: make(map[chan []byte]struct{}),
 	}
 }
 
@@ -204,15 +207,15 @@ func (r *registry) register(req api.RegisterRequest) (*api.App, bool) {
 	r.nextPort1 += 2
 
 	app := &api.App{
-		Space:            req.Space,
-		Dir:              req.Dir,
-		ConfigFile:       req.ConfigFile,
-		DatabaseURL:      fmt.Sprintf("postgres://postgres:postgres@localhost:%d/%s?sslmode=disable", postgresPort, req.Space),
-		WatchPatterns:    req.WatchPatterns,
-		IgnorePatterns:   req.IgnorePatterns,
-		Port1:            p1,
-		Port2:            p2,
-		ActiveColor:    "blue",
+		Space:          req.Space,
+		Dir:            req.Dir,
+		ConfigFile:     req.ConfigFile,
+		DatabaseURL:    fmt.Sprintf("postgres://postgres:postgres@localhost:%d/%s?sslmode=disable", postgresPort, req.Space),
+		WatchPatterns:  req.WatchPatterns,
+		IgnorePatterns: req.IgnorePatterns,
+		Port1:          p1,
+		Port2:          p2,
+		PortActive:     p1,
 		HealthStatus:   "unknown",
 		RecentLogs:     make([]api.LogEntry, 0),
 		RegisteredAt:   time.Now(),
@@ -269,10 +272,7 @@ func (r *registry) activeTarget() (space string, port int, ok bool) {
 		return "", 0, false
 	}
 
-	if app.ActiveColor == "green" {
-		return app.Space, app.Port2, true
-	}
-	return app.Space, app.Port1, true
+	return app.Space, app.PortActive, true
 }
 
 // extractSubdomain pulls the subdomain from a Host header like "greet.localhost:8080".
@@ -294,10 +294,7 @@ func (r *registry) targetForRequest(host string) (space string, port int, ok boo
 		app, exists := r.apps[sub]
 		r.mu.RUnlock()
 		if exists {
-			if app.ActiveColor == "green" {
-				return app.Space, app.Port2, true
-			}
-			return app.Space, app.Port1, true
+			return app.Space, app.PortActive, true
 		}
 	}
 	return r.activeTarget()
@@ -329,7 +326,7 @@ func (r *registry) appendLogs(space string, entries []api.LogEntry) bool {
 	return true
 }
 
-func (r *registry) updateHealth(space, status, activeColor string) bool {
+func (r *registry) updateHealth(space, status string, portActive int) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	app, ok := r.apps[space]
@@ -338,8 +335,8 @@ func (r *registry) updateHealth(space, status, activeColor string) bool {
 	}
 	app.HealthStatus = status
 	app.LastHealthCheck = time.Now()
-	if activeColor == "blue" || activeColor == "green" {
-		app.ActiveColor = activeColor
+	if portActive > 0 {
+		app.PortActive = portActive
 	}
 	return true
 }
@@ -374,10 +371,10 @@ func (r *registry) handleRegisterApp(c echo.Context) error {
 	}
 
 	return c.JSON(status, api.RegisterResponse{
-		Space:            app.Space,
-		Port1:            app.Port1,
-		Port2:            app.Port2,
-		DatabaseURL:      app.DatabaseURL,
+		Space:       app.Space,
+		Port1:       app.Port1,
+		Port2:       app.Port2,
+		DatabaseURL: app.DatabaseURL,
 	})
 }
 
@@ -414,13 +411,13 @@ func (r *registry) handleAppendLogs(c echo.Context) error {
 func (r *registry) handleUpdateHealth(c echo.Context) error {
 	space := c.Param("space")
 	var body struct {
-		Status      string `json:"status"`
-		ActiveColor string `json:"active_color"`
+		PortActive int    `json:"port_active"`
+		Status     string `json:"status"`
 	}
 	if err := c.Bind(&body); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 	}
-	if !r.updateHealth(space, body.Status, body.ActiveColor) {
+	if !r.updateHealth(space, body.Status, body.PortActive) {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "not found"})
 	}
 
@@ -590,7 +587,7 @@ const spacesJS = `(function() {
     const list = Object.values(allApps);
     let h = "";
     for (const a of list) {
-      const p = a.active_color === "green" ? a.port2 : a.port1;
+      const p = a.port_active;
       const active = a.space === space ? " active" : "";
       const href = location.protocol + "//" + a.space + ".localhost:" + location.port + "/";
       h += '<a class="__sc-item' + active + '" href="' + href + '">' +
@@ -617,7 +614,7 @@ const spacesJS = `(function() {
     if (app.space !== space) return;
 
     dot.className = "__sc-dot " + app.health_status;
-    const p = app.active_color === "green" ? app.port2 : app.port1;
+    const p = app.port_active;
     label.textContent = app.space + " :" + p;
 
     if (String(p) !== lastPort && app.health_status === "healthy" && !reloading) {
@@ -717,8 +714,8 @@ var dashboardTmpl = template.Must(template.New("dashboard").Parse(`<!DOCTYPE htm
       '<th>Health</th><th>Watch</th><th>Logs</th></tr></thead><tbody>';
     for (const a of list) {
       const watch = (a.watch_patterns || []).map(p => '<code>' + p + '</code>').join(' ');
-      const p1cls = a.active_color === 'blue' ? ' class="active-port"' : '';
-      const p2cls = a.active_color === 'green' ? ' class="active-port"' : '';
+      const p1cls = a.port_active === a.port1 ? ' class="active-port"' : '';
+      const p2cls = a.port_active === a.port2 ? ' class="active-port"' : '';
       h += '<tr>' +
         '<td><strong><a href="' + location.protocol + '//' + a.space + '.localhost:' + location.port + '/">' + a.space + '</a></strong></td>' +
         '<td><code>' + (a.config_file || '') + '</code></td>' +
@@ -860,10 +857,7 @@ func (r *registry) probeHealth() {
 	r.mu.RUnlock()
 
 	for _, app := range apps {
-		port := app.Port1
-		if app.ActiveColor == "green" {
-			port = app.Port2
-		}
+		port := app.PortActive
 		resp, err := client.Get(fmt.Sprintf("http://localhost:%d/health", port))
 		if err != nil {
 			continue

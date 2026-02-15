@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -11,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cockroachdb/errors"
 	"github.com/lmittmann/tint"
 
 	"github.com/housecat-inc/spacecat/pkg/watch"
@@ -93,14 +93,14 @@ func (r *proxyRunner) buildAndStartLocked() error {
 	build.Stdout = os.Stdout
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {
-		return fmt.Errorf("build: %w", err)
+		return errors.Wrap(err, "build")
 	}
 
 	cmd := exec.Command(binPath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start: %w", err)
+		return errors.Wrap(err, "start")
 	}
 
 	r.cmd = cmd

@@ -29,6 +29,10 @@ Conventions over configuration:
 
 Run `go run main.go` to run the proxy in development mode with live reload.
 
+```bash
+go test -v ./... -artifacts artifacts
+```
+
 ## Roadmap
 
 - [ ] Internet gateway

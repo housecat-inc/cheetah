@@ -1,13 +1,17 @@
-package space
+package code
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 
 	"github.com/cockroachdb/errors"
 )
+
+type CmdResult struct {
+	Err string
+	Out string
+}
 
 type Config struct {
 	CmdOutput func(string, ...string) (string, error)
@@ -20,52 +24,7 @@ type Out struct {
 	Name string
 }
 
-func DefaultConfig() Config {
-	return Config{
-		CmdOutput: func(name string, args ...string) (string, error) {
-			out, err := exec.Command(name, args...).Output()
-			return string(out), errors.Wrap(err, "")
-		},
-		Getenv: os.Getenv,
-		Getwd:  os.Getwd,
-	}
-}
-
-type CmdResult struct {
-	Err string
-	Out string
-}
-
-func TestConfig(cmds map[string]CmdResult, dir string, env []string) Config {
-	return Config{
-		CmdOutput: func(name string, args ...string) (string, error) {
-			cmd := strings.Join(append([]string{name}, args...), " ")
-			if r, ok := cmds[cmd]; ok {
-				if r.Err != "" {
-					return "", fmt.Errorf("%s", r.Err)
-				}
-				return r.Out, nil
-			}
-			return "", nil
-		},
-		Getenv: func(key string) string {
-			for _, e := range env {
-				k, v, _ := strings.Cut(e, "=")
-				if k == key {
-					return v
-				}
-			}
-			return ""
-		},
-		Getwd: func() (string, error) { return dir, nil },
-	}
-}
-
-func Default() (Out, error) {
-	return Space(DefaultConfig())
-}
-
-func Space(cfg Config) (Out, error) {
+func Code(cfg Config) (Out, error) {
 	var name string
 
 	if s := cfg.Getenv("SPACE"); s != "" {
@@ -87,4 +46,44 @@ func Space(cfg Config) (Out, error) {
 	}
 
 	return Out{Dir: dir, Name: name}, nil
+}
+
+func Default() (Out, error) {
+	return Code(DefaultConfig())
+}
+
+func DefaultConfig() Config {
+	return Config{
+		CmdOutput: func(name string, args ...string) (string, error) {
+			out, err := exec.Command(name, args...).Output()
+			return string(out), errors.Wrap(err, "")
+		},
+		Getenv: os.Getenv,
+		Getwd:  os.Getwd,
+	}
+}
+
+func TestConfig(cmds map[string]CmdResult, dir string, env []string) Config {
+	return Config{
+		CmdOutput: func(name string, args ...string) (string, error) {
+			cmd := strings.Join(append([]string{name}, args...), " ")
+			if r, ok := cmds[cmd]; ok {
+				if r.Err != "" {
+					return "", errors.New(r.Err)
+				}
+				return r.Out, nil
+			}
+			return "", nil
+		},
+		Getenv: func(key string) string {
+			for _, e := range env {
+				k, v, _ := strings.Cut(e, "=")
+				if k == key {
+					return v
+				}
+			}
+			return ""
+		},
+		Getwd: func() (string, error) { return dir, nil },
+	}
 }

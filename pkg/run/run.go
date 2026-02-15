@@ -19,8 +19,10 @@ import (
 	"github.com/lmittmann/tint"
 
 	"github.com/housecat-inc/spacecat/pkg/api"
-	"github.com/housecat-inc/spacecat/pkg/db"
-	"github.com/housecat-inc/spacecat/pkg/space"
+	"github.com/housecat-inc/spacecat/pkg/code"
+	"github.com/housecat-inc/spacecat/pkg/config"
+	"github.com/housecat-inc/spacecat/pkg/deps"
+	"github.com/housecat-inc/spacecat/pkg/pg"
 	"github.com/housecat-inc/spacecat/pkg/watch"
 )
 
@@ -28,9 +30,15 @@ const defaultSpacecatURL = "http://spacecat.localhost:50000"
 
 // Run registers with the spacecat dashboard, watches for file changes,
 // and manages a blue/green build/run cycle. It blocks until interrupted.
-func Run() {
+func Run(defaults ...map[string]string) {
+	var defs map[string]string
+	if len(defaults) > 0 {
+		defs = defaults[0]
+	}
+	appEnv := config.Load(config.DefaultEnv(), ".envrc.example", defs)
+
 	spacecatURL := envOr("SPACECAT_URL", defaultSpacecatURL)
-	sp, err := space.Default()
+	sp, err := code.Default()
 	if err != nil {
 		slog.Error("failed to determine space", "error", err)
 		os.Exit(1)
@@ -52,7 +60,7 @@ func Run() {
 		Space:         sp.Name,
 		Dir:           sp.Dir,
 		ConfigFile:    ".envrc",
-		WatchPatterns: []string{"*.go", "go.mod", "*.sql"},
+		WatchPatterns: []string{".envrc", "*.go", "*.sql", "go.mod"},
 	})
 	if err != nil {
 		logger.Error("failed to register", "error", err)
@@ -61,12 +69,14 @@ func Run() {
 	logger.Info("register", "port1", resp.Port1, "port2", resp.Port2)
 
 	runner := &appRunner{
+		appEnv:      appEnv,
+		cmds:        make(map[int]*exec.Cmd),
 		dir:         sp.Dir,
-		spacecatURL: spacecatURL,
-		space:       sp.Name,
-		resp:        resp,
-		activeColor: "blue",
 		logger:      logger,
+		portActive:  resp.Port1,
+		resp:        resp,
+		space:       sp.Name,
+		spacecatURL: spacecatURL,
 	}
 
 	// Ensure database (template + clone) before first build
@@ -75,29 +85,25 @@ func Run() {
 		os.Exit(1)
 	}
 
-	// Run go generate if sqlc config exists
-	if db.HasSqlcConfig(".") {
-		gen := exec.Command("go", "generate", "./...")
-		gen.Stdout = os.Stdout
-		gen.Stderr = os.Stderr
-		if err := gen.Run(); err != nil {
-			logger.Warn("go generate failed", "error", err)
-		}
+	if err := config.Sync(config.DefaultConfig()); err != nil {
+		logger.Warn("config sync failed", "error", err)
 	}
 
-	// Initial build + run on blue
-	if err := runner.buildAndStart("blue"); err != nil {
+	if err := deps.Sync(deps.DefaultConfig()); err != nil {
+		logger.Warn("deps sync failed", "error", err)
+	}
+
+	if err := runner.buildAndStart(resp.Port1); err != nil {
 		logger.Error("initial build failed", "error", err)
 		os.Exit(1)
 	}
 	runner.updateHealth("unknown")
 
-	// Wait for initial health before announcing
-	runner.waitForHealthy(runner.portForColor("blue"))
+	runner.waitForHealthy(resp.Port1)
 	runner.updateHealth("healthy")
 
 	// File watcher
-	w := watch.New(sp.Dir, []string{"*.go", "go.mod", "*.sql"}, nil, func(path string) {
+	w := watch.New(sp.Dir, []string{".envrc", "*.go", "*.sql", "go.mod"}, nil, func(path string) {
 		runner.rebuild(path)
 	})
 	w.Start()
@@ -114,31 +120,20 @@ func Run() {
 }
 
 type appRunner struct {
-	activeColor string
-	blueCmd     *exec.Cmd
+	appEnv      map[string]string
+	cmds        map[int]*exec.Cmd
 	dir         string
-	greenCmd    *exec.Cmd
 	logger      *slog.Logger
 	mu          sync.Mutex
+	portActive  int
 	resp        *api.RegisterResponse
 	space       string
 	spacecatURL string
 }
 
-func (r *appRunner) portForColor(color string) int {
-	if color == "green" {
-		return r.resp.Port2
-	}
-	return r.resp.Port1
-}
-
-// buildAndStart builds the binary and starts it on the given color's port.
-// Does NOT stop any existing process or change activeColor.
-func (r *appRunner) buildAndStart(color string) error {
+func (r *appRunner) buildAndStart(port int) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
-	port := r.portForColor(color)
 
 	// Build into .spacecat/ (gitignored, watcher-ignored)
 	binPath := filepath.Join(".spacecat", "app")
@@ -154,11 +149,14 @@ func (r *appRunner) buildAndStart(color string) error {
 		return errors.Wrap(err, "build")
 	}
 
-	// Run
 	cmd := exec.Command(binPath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Env = append(os.Environ(),
+	cmd.Env = os.Environ()
+	for k, v := range r.appEnv {
+		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
+	}
+	cmd.Env = append(cmd.Env,
 		fmt.Sprintf("PORT=%d", port),
 		fmt.Sprintf("DATABASE_URL=%s", r.resp.DatabaseURL),
 		fmt.Sprintf("SPACE=%s", r.space),
@@ -167,11 +165,7 @@ func (r *appRunner) buildAndStart(color string) error {
 		return errors.Wrap(err, "run")
 	}
 
-	if color == "green" {
-		r.greenCmd = cmd
-	} else {
-		r.blueCmd = cmd
-	}
+	r.cmds[port] = cmd
 
 	r.logger.Info("server", "port", port, "pid", cmd.Process.Pid)
 	return nil
@@ -189,14 +183,18 @@ func (r *appRunner) rebuild(changedPath string) {
 	}
 	r.logger.Info("builder")
 
-	// Pre-build hooks
+	if filepath.Base(changedPath) == ".envrc" {
+		if err := config.Sync(config.DefaultConfig()); err != nil {
+			r.logger.Error("config sync failed", "error", err)
+			r.sendLog("error", fmt.Sprintf("config sync failed: %v", err))
+			return
+		}
+	}
+
 	if filepath.Base(changedPath) == "go.mod" {
-		tidy := exec.Command("go", "mod", "tidy")
-		tidy.Stdout = os.Stdout
-		tidy.Stderr = os.Stderr
-		if err := tidy.Run(); err != nil {
-			r.logger.Error("go mod tidy failed", "error", err)
-			r.sendLog("error", fmt.Sprintf("go mod tidy failed: %v", err))
+		if err := deps.Sync(deps.DefaultConfig()); err != nil {
+			r.logger.Error("deps sync failed", "error", err)
+			r.sendLog("error", fmt.Sprintf("deps sync failed: %v", err))
 			return
 		}
 	}
@@ -208,7 +206,7 @@ func (r *appRunner) rebuild(changedPath string) {
 			r.sendLog("error", fmt.Sprintf("database rebuild failed: %v", err))
 			return
 		}
-		if db.HasSqlcConfig(".") {
+		if pg.HasSqlcConfig(".") {
 			gen := exec.Command("go", "generate", "./...")
 			gen.Stdout = os.Stdout
 			gen.Stderr = os.Stderr
@@ -219,37 +217,32 @@ func (r *appRunner) rebuild(changedPath string) {
 	}
 
 	r.mu.Lock()
-	oldColor := r.activeColor
-	newColor := "green"
-	if oldColor == "green" {
-		newColor = "blue"
+	oldPort := r.portActive
+	newPort := r.resp.Port2
+	if oldPort == r.resp.Port2 {
+		newPort = r.resp.Port1
 	}
 	r.mu.Unlock()
 
-	// Build + start new
-	if err := r.buildAndStart(newColor); err != nil {
+	if err := r.buildAndStart(newPort); err != nil {
 		r.logger.Error("build failed", "error", err)
 		r.sendLog("error", fmt.Sprintf("build failed: %v", err))
 		return
 	}
 
-	// Wait for new to be healthy
-	newPort := r.portForColor(newColor)
 	if !r.waitForHealthy(newPort) {
 		r.logger.Error("health check failed, aborting swap")
 		r.sendLog("error", "health check failed")
-		r.stopColor(newColor)
+		r.stopPort(newPort)
 		return
 	}
 
-	// Swap — proxy now routes to the new color
 	r.mu.Lock()
-	r.activeColor = newColor
+	r.portActive = newPort
 	r.mu.Unlock()
 	r.updateHealth("healthy")
 
-	// Stop old
-	r.stopColor(oldColor)
+	r.stopPort(oldPort)
 }
 
 // waitForHealthy polls the health endpoint until healthy or timeout.
@@ -270,16 +263,10 @@ func (r *appRunner) waitForHealthy(port int) bool {
 	return false
 }
 
-func (r *appRunner) stopColor(color string) {
+func (r *appRunner) stopPort(port int) {
 	r.mu.Lock()
-	var cmd *exec.Cmd
-	if color == "green" {
-		cmd = r.greenCmd
-		r.greenCmd = nil
-	} else {
-		cmd = r.blueCmd
-		r.blueCmd = nil
-	}
+	cmd := r.cmds[port]
+	delete(r.cmds, port)
 	r.mu.Unlock()
 
 	stopProcess(cmd)
@@ -287,45 +274,44 @@ func (r *appRunner) stopColor(color string) {
 
 func (r *appRunner) stopAll() {
 	r.mu.Lock()
-	blue := r.blueCmd
-	green := r.greenCmd
-	r.blueCmd = nil
-	r.greenCmd = nil
+	cmds := r.cmds
+	r.cmds = make(map[int]*exec.Cmd)
 	r.mu.Unlock()
 
-	stopProcess(blue)
-	stopProcess(green)
+	for _, cmd := range cmds {
+		stopProcess(cmd)
+	}
 }
 
 // ensureDatabase discovers migrations, hashes them, creates/updates the
 // template DB, and clones it to the app's database.
 func (r *appRunner) ensureDatabase() error {
-	migDir, err := db.FindMigrationDir(".")
+	migDir, err := pg.MigrationDir(".")
 	if err != nil {
 		return nil // no migrations, skip silently
 	}
 
-	hash, err := db.HashMigrations(migDir)
+	hash, err := pg.Hash(migDir)
 	if err != nil {
 		return errors.Wrap(err, "hash migrations")
 	}
 
-	adminURL, err := db.AdminURL(r.resp.DatabaseURL)
+	adminURL, err := pg.AdminURL(r.resp.DatabaseURL)
 	if err != nil {
 		return errors.Wrap(err, "admin url")
 	}
 
-	tmplName, err := db.EnsureTemplate(adminURL, migDir, hash)
+	tmplName, err := pg.Template(adminURL, migDir, hash)
 	if err != nil {
 		return errors.Wrap(err, "ensure template")
 	}
 
-	appDBName, err := db.DBNameFromURL(r.resp.DatabaseURL)
+	appDBName, err := pg.DBName(r.resp.DatabaseURL)
 	if err != nil {
 		return errors.Wrap(err, "db name")
 	}
 
-	if err := db.CloneDB(adminURL, tmplName, appDBName); err != nil {
+	if err := pg.Create(adminURL, tmplName, appDBName); err != nil {
 		return errors.Wrap(err, "clone db")
 	}
 
@@ -353,12 +339,12 @@ func stopProcess(cmd *exec.Cmd) {
 
 func (r *appRunner) updateHealth(status string) {
 	r.mu.Lock()
-	color := r.activeColor
+	port := r.portActive
 	r.mu.Unlock()
 
-	body, _ := json.Marshal(map[string]string{
-		"status":       status,
-		"active_color": color,
+	body, _ := json.Marshal(map[string]any{
+		"status":      status,
+		"port_active": port,
 	})
 	url := fmt.Sprintf("%s/api/apps/%s/health", r.spacecatURL, r.space)
 	req, _ := http.NewRequest(http.MethodPut, url, bytes.NewReader(body))
@@ -380,11 +366,11 @@ func (r *appRunner) sendLog(level, message string) {
 func register(spacecatURL string, req api.RegisterRequest) (*api.RegisterResponse, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "marshal")
 	}
 	resp, err := http.Post(spacecatURL+"/api/apps", "application/json", bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "post")
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
@@ -392,7 +378,7 @@ func register(spacecatURL string, req api.RegisterRequest) (*api.RegisterRespons
 	}
 	var result api.RegisterResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "decode")
 	}
 	return &result, nil
 }
