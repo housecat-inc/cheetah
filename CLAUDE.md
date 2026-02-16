@@ -11,12 +11,6 @@ Use `In` and `Out` structs.
 Use `github.com/cockroachdb/errors` and return wrapped errors: `return out, errors.Wrap(err, "foo")`, `return errors.Wrap(foo(), "foo")`
 Use `github.com/stretchr/testify/assert`: `a := assert.New()`, `r := require.New()`
 
-## Config
-
-## Backing services
-
-## Build, release, run
-
 ## Testing
 
 Write table driven tests with `_name` test cases that assert `a.Equal(tt.out, out)`:

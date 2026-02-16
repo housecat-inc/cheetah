@@ -33,6 +33,7 @@ Run `go run main.go` to run cheetah in development mode with live reload. Run `g
 
 ## Roadmap
 
-- [ ] Remote, shared, encrypted config
-- [ ] Internet gateway
+- [x] Remote, shared, encrypted config
+- [ ] Log collector and error callback to agent
 - [ ] Test runner with short, parallel, and error callback optimizations
+- [ ] Internet gateway
