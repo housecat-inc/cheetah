@@ -3,6 +3,7 @@ package code
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/cockroachdb/errors"
@@ -25,8 +26,12 @@ type Out struct {
 }
 
 func Code(cfg Config) (Out, error) {
-	var name string
+	dir, err := cfg.Getwd()
+	if err != nil {
+		return Out{}, errors.Wrap(err, "getwd")
+	}
 
+	var name string
 	if s := cfg.Getenv("SPACE"); s != "" {
 		name = s
 	} else if s := cfg.Getenv("CONDUCTOR_SPACE"); s != "" {
@@ -36,13 +41,8 @@ func Code(cfg Config) (Out, error) {
 		if err != nil {
 			return Out{}, errors.Wrap(err, "set SPACE or CONDUCTOR_SPACE env var, or run in a git repo")
 		}
-		branch := strings.TrimSpace(out)
-		name = strings.ReplaceAll(branch, "/", "-")
-	}
-
-	dir, err := cfg.Getwd()
-	if err != nil {
-		return Out{}, errors.Wrap(err, "getwd")
+		branch := strings.ReplaceAll(strings.TrimSpace(out), "/", "-")
+		name = filepath.Base(dir) + "-" + branch
 	}
 
 	return Out{Dir: dir, Name: name}, nil
@@ -61,6 +61,14 @@ func SystemConfig() Config {
 		Getenv: os.Getenv,
 		Getwd:  os.Getwd,
 	}
+}
+
+func AppName(dir, space string) string {
+	base := filepath.Base(dir)
+	if base == space {
+		return filepath.Base(filepath.Dir(dir))
+	}
+	return base
 }
 
 func TestConfig(cmds map[string]CmdResult, dir string, env []string) Config {

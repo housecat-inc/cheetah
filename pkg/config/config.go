@@ -66,10 +66,15 @@ type Out struct {
 	Providers []string
 }
 
-func Load(env Env, dir string, defaults ...map[string]string) Out {
-	var defs map[string]string
-	if len(defaults) > 0 {
-		defs = defaults[0]
+type LoadIn struct {
+	Defaults map[string]string
+	ProxyEnv map[string]string
+}
+
+func Load(env Env, dir string, ins ...LoadIn) Out {
+	var in LoadIn
+	if len(ins) > 0 {
+		in = ins[0]
 	}
 
 	vars := map[string]string{}
@@ -78,8 +83,8 @@ func Load(env Env, dir string, defaults ...map[string]string) Out {
 	if data, err := env.ReadFile(filepath.Join(dir, ".envrc.example")); err == nil {
 		contributed := false
 		for k, v := range ParseExample(data) {
-			if defs != nil {
-				if _, ok := defs[k]; !ok {
+			if in.Defaults != nil {
+				if _, ok := in.Defaults[k]; !ok {
 					continue
 				}
 			}
@@ -93,9 +98,9 @@ func Load(env Env, dir string, defaults ...map[string]string) Out {
 		}
 	}
 
-	if defs != nil {
+	if in.Defaults != nil {
 		contributed := false
-		for k, v := range defs {
+		for k, v := range in.Defaults {
 			if v != "" {
 				vars[k] = v
 				contributed = true
@@ -105,6 +110,19 @@ func Load(env Env, dir string, defaults ...map[string]string) Out {
 		}
 		if _, err := env.Stat(filepath.Join(dir, "main.go")); err == nil && contributed {
 			providers = append(providers, "main.go")
+		}
+	}
+
+	if in.ProxyEnv != nil {
+		contributed := false
+		for k, v := range in.ProxyEnv {
+			vars[k] = v
+			if v != "" {
+				contributed = true
+			}
+		}
+		if contributed {
+			providers = append(providers, "cheetah")
 		}
 	}
 

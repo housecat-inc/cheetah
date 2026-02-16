@@ -1,8 +1,11 @@
 package cheetah
 
 import (
+	"bufio"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -12,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cockroachdb/errors"
 	"github.com/housecat-inc/cheetah/pkg/api"
 	"github.com/housecat-inc/cheetah/pkg/build"
 	"github.com/housecat-inc/cheetah/pkg/code"
@@ -33,10 +37,20 @@ func Run(defaults ...map[string]string) {
 		os.Exit(1)
 	}
 
-	cfg := config.Load(config.DefaultEnv(), space.Dir, defaults...)
+	var defs map[string]string
+	if len(defaults) > 0 {
+		defs = defaults[0]
+	}
+
+	cfg := config.Load(config.DefaultEnv(), space.Dir, config.LoadIn{Defaults: defs})
 
 	l := logs.New(space.Name)
 	slog.SetDefault(l)
+
+	if err := ensureInfra(url); err != nil {
+		l.Error("failed to start infrastructure", "error", err)
+		os.Exit(1)
+	}
 
 	client := api.NewClient(url)
 	resp, err := client.AppPost(api.AppIn{
@@ -51,16 +65,29 @@ func Run(defaults ...map[string]string) {
 	}
 	l.Info("register", "blue", resp.Ports.Blue, "green", resp.Ports.Green)
 
+	cfg = config.Load(config.DefaultEnv(), space.Dir, config.LoadIn{Defaults: defs, ProxyEnv: resp.Env})
+
+	if len(resp.Env) > 0 {
+		client.AppPost(api.AppIn{
+			Config: cfg.Providers,
+			Dir:    space.Dir,
+			Space:  space.Name,
+			Watch:  api.Watch{Match: []string{".envrc", "*.go", "*.sql", "*.templ", "go.mod"}},
+		})
+	}
+
 	ports := port.New(resp.Ports.Blue, resp.Ports.Green, port.DefaultConfig(client, space.Name))
 
 	runner := &appRunner{
 		appEnv:      cfg.Env,
+		appName:     code.AppName(space.Dir, space.Name),
 		client:      client,
 		cmds:        make(map[int]*exec.Cmd),
-		defaults:    defaults,
+		defs:        defs,
 		dir:         space.Dir,
 		logger:      l,
 		ports:       ports,
+		proxyEnv:    resp.Env,
 		resp:        resp,
 		space:       space.Name,
 		cheetahURL: url,
@@ -93,6 +120,8 @@ func Run(defaults ...map[string]string) {
 	})
 	w.Start()
 
+	go runner.watchEnvEvents()
+
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
@@ -105,13 +134,15 @@ func Run(defaults ...map[string]string) {
 
 type appRunner struct {
 	appEnv      map[string]string
+	appName     string
 	client      *api.Client
 	cmds        map[int]*exec.Cmd
-	defaults    []map[string]string
+	defs        map[string]string
 	dir         string
 	logger      *slog.Logger
 	mu          sync.Mutex
 	ports       *port.Manager
+	proxyEnv    map[string]string
 	resp        *api.AppOut
 	space       string
 	cheetahURL string
@@ -148,7 +179,7 @@ func (r *appRunner) rebuild(changedPath string) {
 			r.sendLog("error", fmt.Sprintf("config sync failed: %v", err))
 			return
 		}
-		cfg := config.Load(config.DefaultEnv(), r.dir, r.defaults...)
+		cfg := config.Load(config.DefaultEnv(), r.dir, config.LoadIn{Defaults: r.defs, ProxyEnv: r.proxyEnv})
 		r.appEnv = cfg.Env
 	}
 
@@ -219,4 +250,109 @@ func (r *appRunner) sendLog(level, message string) {
 		Message:   message,
 		Timestamp: time.Now(),
 	}})
+}
+
+func (r *appRunner) watchEnvEvents() {
+	for {
+		r.listenEnvEvents()
+		time.Sleep(2 * time.Second)
+	}
+}
+
+func (r *appRunner) listenEnvEvents() {
+	resp, err := http.Get(r.cheetahURL + "/api/events")
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+
+	scanner := bufio.NewScanner(resp.Body)
+	var eventType string
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "event: ") {
+			eventType = strings.TrimPrefix(line, "event: ")
+		} else if strings.HasPrefix(line, "data: ") && eventType == "env" {
+			data := strings.TrimPrefix(line, "data: ")
+			var payload struct {
+				App  string            `json:"app"`
+				Vars map[string]string `json:"vars"`
+			}
+			if json.Unmarshal([]byte(data), &payload) == nil && payload.App == r.appName {
+				r.envReload(payload.Vars)
+			}
+			eventType = ""
+		} else if line == "" {
+			eventType = ""
+		}
+	}
+}
+
+func (r *appRunner) envReload(vars map[string]string) {
+	r.logger.Info("env update from dashboard")
+	r.proxyEnv = vars
+	cfg := config.Load(config.DefaultEnv(), r.dir, config.LoadIn{Defaults: r.defs, ProxyEnv: r.proxyEnv})
+	r.appEnv = cfg.Env
+
+	r.client.AppPost(api.AppIn{
+		Config: cfg.Providers,
+		Dir:    r.dir,
+		Space:  r.space,
+		Watch:  api.Watch{Match: []string{".envrc", "*.go", "*.sql", "*.templ", "go.mod"}},
+	})
+
+	if !r.ports.Swap(r.start, r.stopPort) {
+		r.logger.Error("swap failed")
+		r.sendLog("error", "swap failed after env update")
+	}
+}
+
+func ensureInfra(url string) error {
+	c := &http.Client{Timeout: 1 * time.Second}
+	if resp, err := c.Get(url + "/api/status"); err == nil {
+		resp.Body.Close()
+		return nil
+	}
+
+	slog.Info("starting cheetah")
+
+	install := exec.Command("go", "install", "github.com/housecat-inc/cheetah/cmd/cheetah@latest")
+	install.Stdout = os.Stdout
+	install.Stderr = os.Stderr
+	if err := install.Run(); err != nil {
+		return errors.Wrap(err, "go install cheetah")
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return errors.Wrap(err, "user home dir")
+	}
+	dir := filepath.Join(home, ".cheetah")
+	os.MkdirAll(dir, 0o755)
+
+	logFile, err := os.OpenFile(filepath.Join(dir, "cheetah.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return errors.Wrap(err, "open cheetah log")
+	}
+
+	cmd := exec.Command("cheetah")
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		logFile.Close()
+		return errors.Wrap(err, "start cheetah")
+	}
+	logFile.Close()
+
+	for i := 0; i < 60; i++ {
+		time.Sleep(500 * time.Millisecond)
+		if resp, err := c.Get(url + "/api/status"); err == nil {
+			resp.Body.Close()
+			slog.Info("cheetah ready")
+			return nil
+		}
+	}
+
+	return errors.New("cheetah did not become ready")
 }

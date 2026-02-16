@@ -16,6 +16,7 @@ func TestLoad(t *testing.T) {
 		defaults map[string]string
 		env      map[string]string
 		files    map[string]string
+		proxyEnv map[string]string
 		out      config.Out
 	}{
 		{
@@ -141,13 +142,61 @@ func TestLoad(t *testing.T) {
 			defaults: map[string]string{"PORT": "8080"},
 			out:      config.Out{Env: map[string]string{"PORT": "8080"}},
 		},
+		{
+			_name:    "proxy env overrides defaults",
+			defaults: map[string]string{"PORT": "8080", "SECRET": ""},
+			proxyEnv: map[string]string{"SECRET": "from-proxy"},
+			out: config.Out{
+				Env:       map[string]string{"PORT": "8080", "SECRET": "from-proxy"},
+				Providers: []string{"cheetah"},
+			},
+		},
+		{
+			_name:    "envrc overrides proxy env",
+			defaults: map[string]string{"PORT": "8080"},
+			proxyEnv: map[string]string{"PORT": "from-proxy"},
+			files:    map[string]string{".envrc": "export PORT=from-envrc"},
+			out: config.Out{
+				Env:       map[string]string{"PORT": "from-envrc"},
+				Providers: []string{"cheetah", ".envrc"},
+			},
+		},
+		{
+			_name:    "os env overrides proxy env",
+			defaults: map[string]string{"PORT": "8080"},
+			proxyEnv: map[string]string{"PORT": "from-proxy"},
+			env:      map[string]string{"PORT": "from-os"},
+			out: config.Out{
+				Env:       map[string]string{"PORT": "from-os"},
+				Providers: []string{"cheetah"},
+			},
+		},
+		{
+			_name:    "proxy env adds new keys",
+			proxyEnv: map[string]string{"NEW_KEY": "new-val"},
+			out: config.Out{
+				Env:       map[string]string{"NEW_KEY": "new-val"},
+				Providers: []string{"cheetah"},
+			},
+		},
+		{
+			_name:    "full priority chain",
+			defaults: map[string]string{"A": "default", "B": "default", "C": "default", "D": "default"},
+			proxyEnv: map[string]string{"B": "proxy", "C": "proxy", "D": "proxy"},
+			files:    map[string]string{".envrc": "export C=envrc\nexport D=envrc"},
+			env:      map[string]string{"D": "os"},
+			out: config.Out{
+				Env:       map[string]string{"A": "default", "B": "proxy", "C": "envrc", "D": "os"},
+				Providers: []string{"cheetah", ".envrc"},
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt._name, func(t *testing.T) {
 			a := assert.New(t)
 
-			out := config.Load(config.TestEnv(tt.env, tt.files), "", tt.defaults)
+			out := config.Load(config.TestEnv(tt.env, tt.files), "", config.LoadIn{Defaults: tt.defaults, ProxyEnv: tt.proxyEnv})
 			a.Equal(tt.out, out)
 		})
 	}

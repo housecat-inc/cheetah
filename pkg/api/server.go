@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/housecat-inc/cheetah/pkg/code"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 )
@@ -32,6 +33,7 @@ type ServerConfig struct {
 type Server struct {
 	apps            map[string]*App
 	config          ServerConfig
+	env             map[string]map[string]string
 	lastRegistered  string
 	logger          *slog.Logger
 	mu              sync.RWMutex
@@ -47,6 +49,7 @@ func NewServer(cfg ServerConfig, logger *slog.Logger) *Server {
 	return &Server{
 		apps:        make(map[string]*App),
 		config:      cfg,
+		env:         make(map[string]map[string]string),
 		logger:      logger,
 		nextPort1:   cfg.BluePortStart,
 		startTime:   time.Now(),
@@ -106,6 +109,12 @@ func (s *Server) Routes(e *echo.Echo) {
 	e.DELETE("/api/apps/:space", s.handleAppDelete)
 	e.POST("/api/apps/:space/logs", s.handleLogPost)
 	e.PUT("/api/apps/:space/health", s.handleHealthPut)
+	e.GET("/api/env", s.handleEnvList)
+	e.POST("/api/env/export", s.handleEnvExport)
+	e.POST("/api/env/import", s.handleEnvImport)
+	e.GET("/api/env/:app", s.handleEnvGet)
+	e.PUT("/api/env/:app", s.handleEnvPut)
+	e.DELETE("/api/env/:app/:key", s.handleEnvDelete)
 }
 
 // SSE
@@ -149,6 +158,8 @@ func (s *Server) register(req AppIn) (*App, bool) {
 	defer s.mu.Unlock()
 
 	if existing, exists := s.apps[req.Space]; exists {
+		existing.Config = req.Config
+		existing.Dir = req.Dir
 		s.lastRegistered = req.Space
 		return existing, true
 	}
@@ -314,8 +325,10 @@ func (s *Server) handleAppPost(c echo.Context) error {
 		status = http.StatusOK
 	}
 
+	appName := code.AppName(req.Dir, req.Space)
 	return c.JSON(status, AppOut{
 		DatabaseURL: app.DatabaseURL,
+		Env:         s.envGet(appName),
 		Ports:       app.Ports,
 		Space:       app.Space,
 	})
@@ -400,6 +413,138 @@ func (s *Server) handleEventsStream(c echo.Context) error {
 			w.Flush()
 		}
 	}
+}
+
+// Env management
+
+func (s *Server) envGet(app string) map[string]string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	vars := s.env[app]
+	if vars == nil {
+		return nil
+	}
+	out := make(map[string]string, len(vars))
+	for k, v := range vars {
+		out[k] = v
+	}
+	return out
+}
+
+func (s *Server) envReplace(app string, vars map[string]string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(vars) == 0 {
+		delete(s.env, app)
+		return
+	}
+	s.env[app] = make(map[string]string, len(vars))
+	for k, v := range vars {
+		s.env[app][k] = v
+	}
+}
+
+func (s *Server) envDeleteKey(app, key string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	vars := s.env[app]
+	if vars == nil {
+		return false
+	}
+	delete(vars, key)
+	if len(vars) == 0 {
+		delete(s.env, app)
+	}
+	return true
+}
+
+func (s *Server) envList() map[string]map[string]string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]map[string]string, len(s.env))
+	for app, vars := range s.env {
+		cp := make(map[string]string, len(vars))
+		for k, v := range vars {
+			cp[k] = v
+		}
+		out[app] = cp
+	}
+	return out
+}
+
+func (s *Server) handleEnvList(c echo.Context) error {
+	return c.JSON(http.StatusOK, s.envList())
+}
+
+func (s *Server) handleEnvGet(c echo.Context) error {
+	vars := s.envGet(c.Param("app"))
+	if vars == nil {
+		return c.JSON(http.StatusOK, map[string]string{})
+	}
+	return c.JSON(http.StatusOK, vars)
+}
+
+func (s *Server) handleEnvPut(c echo.Context) error {
+	app := c.Param("app")
+	var vars map[string]string
+	if err := json.NewDecoder(c.Request().Body).Decode(&vars); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+	}
+	s.envReplace(app, vars)
+	s.broadcast("env", map[string]any{"app": app, "vars": s.envGet(app)})
+	return c.NoContent(http.StatusNoContent)
+}
+
+func (s *Server) handleEnvDelete(c echo.Context) error {
+	app := c.Param("app")
+	key := c.Param("key")
+	if !s.envDeleteKey(app, key) {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "not found"})
+	}
+	s.broadcast("env", map[string]any{"app": app, "vars": s.envGet(app)})
+	return c.NoContent(http.StatusNoContent)
+}
+
+func (s *Server) handleEnvExport(c echo.Context) error {
+	var in EnvExportIn
+	if err := c.Bind(&in); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+	}
+	if in.App == "" || in.Passphrase == "" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "app and passphrase required"})
+	}
+
+	vars := s.envGet(in.App)
+	if vars == nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "no env for app"})
+	}
+
+	blob, err := encryptEnv(in.App, vars, in.Passphrase)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+
+	return c.JSON(http.StatusOK, EnvExportOut{Blob: blob})
+}
+
+func (s *Server) handleEnvImport(c echo.Context) error {
+	var in EnvImportIn
+	if err := c.Bind(&in); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+	}
+	if in.Blob == "" || in.Passphrase == "" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "blob and passphrase required"})
+	}
+
+	app, vars, err := decryptEnv(in.Blob, in.Passphrase)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+	}
+
+	s.envReplace(app, vars)
+	s.broadcast("env", map[string]any{"app": app, "vars": s.envGet(app)})
+
+	return c.JSON(http.StatusOK, EnvImportOut{App: app, Vars: vars})
 }
 
 // OAuth bouncer
@@ -629,15 +774,17 @@ func (s *Server) handleIndex(c echo.Context) error {
 // State persistence
 
 type serverState struct {
-	Apps           map[string]*App `json:"apps"`
-	LastRegistered string          `json:"last_registered"`
-	NextPort1      int             `json:"next_port1"`
+	Apps           map[string]*App              `json:"apps"`
+	Env            map[string]map[string]string `json:"env,omitempty"`
+	LastRegistered string                       `json:"last_registered"`
+	NextPort1      int                          `json:"next_port1"`
 }
 
 func (s *Server) SaveState(path string) {
 	s.mu.RLock()
 	state := serverState{
 		Apps:           s.apps,
+		Env:            s.env,
 		LastRegistered: s.lastRegistered,
 		NextPort1:      s.nextPort1,
 	}
@@ -672,6 +819,7 @@ func (s *Server) LoadState(path string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.apps = state.Apps
+	s.env = state.Env
 	s.nextPort1 = state.NextPort1
 	if s.nextPort1 < s.config.BluePortStart {
 		s.nextPort1 = s.config.BluePortStart
@@ -680,6 +828,9 @@ func (s *Server) LoadState(path string) {
 
 	if s.apps == nil {
 		s.apps = make(map[string]*App)
+	}
+	if s.env == nil {
+		s.env = make(map[string]map[string]string)
 	}
 	for _, app := range s.apps {
 		app.Health.Status = "unknown"

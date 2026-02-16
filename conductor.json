@@ -1,0 +1,6 @@
+{
+    "scripts": {
+        "setup": "go generate ./...",
+        "run": "go run main.go"
+    }
+}
