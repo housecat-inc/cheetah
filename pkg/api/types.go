@@ -52,7 +52,27 @@ type AppIn struct {
 }
 
 type AppOut struct {
-	DatabaseURL string `json:"database_url"`
-	Ports       Ports  `json:"ports"`
-	Space       string `json:"space"`
+	DatabaseURL string            `json:"database_url"`
+	Env         map[string]string `json:"env,omitempty"`
+	Ports       Ports             `json:"ports"`
+	Space       string            `json:"space"`
+}
+
+type EnvExportIn struct {
+	App        string `json:"app"`
+	Passphrase string `json:"passphrase"`
+}
+
+type EnvExportOut struct {
+	Blob string `json:"blob"`
+}
+
+type EnvImportIn struct {
+	Blob       string `json:"blob"`
+	Passphrase string `json:"passphrase"`
+}
+
+type EnvImportOut struct {
+	App  string            `json:"app"`
+	Vars map[string]string `json:"vars"`
 }
