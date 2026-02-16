@@ -61,10 +61,10 @@ func TestCode(t *testing.T) {
 			out:   code.Out{Dir: "/projects/auth", Name: "s"},
 		},
 		{
-			_name: "conductor space",
-			dir:   "/workspaces/cheetah/victoria/apps/auth",
-			env:   []string{"CONDUCTOR_SPACE=victoria"},
-			out:   code.Out{Dir: "/workspaces/cheetah/victoria/apps/auth", Name: "victoria"},
+			_name: "conductor workspace name",
+			dir:   "/workspaces/cheetah/caracas/apps/auth",
+			env:   []string{"CONDUCTOR_WORKSPACE_NAME=caracas"},
+			out:   code.Out{Dir: "/workspaces/cheetah/caracas/apps/auth", Name: "caracas"},
 		},
 		{
 			_name: "branch combines with dir",
@@ -88,7 +88,7 @@ func TestCode(t *testing.T) {
 			cmds: map[string]code.CmdResult{
 				"git rev-parse --abbrev-ref HEAD": {Err: "exit status 128"},
 			},
-			err: "set SPACE or CONDUCTOR_SPACE env var, or run in a git repo",
+			err: "set SPACE or CONDUCTOR_WORKSPACE_NAME env var, or run in a git repo",
 		},
 	}
 

@@ -67,6 +67,6 @@ func Run(in In) (Out, error) {
 		return Out{}, errors.Wrap(err, "run")
 	}
 
-	slog.Info("server", "port", in.Port, "pid", cmd.Process.Pid)
+	slog.Info("server", "port", in.Port, "pid", cmd.Process.Pid, "url", "http://localhost:50000")
 	return Out{Cmd: cmd}, nil
 }

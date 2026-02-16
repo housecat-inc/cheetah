@@ -34,12 +34,12 @@ func Code(cfg Config) (Out, error) {
 	var name string
 	if s := cfg.Getenv("SPACE"); s != "" {
 		name = s
-	} else if s := cfg.Getenv("CONDUCTOR_SPACE"); s != "" {
+	} else if s := cfg.Getenv("CONDUCTOR_WORKSPACE_NAME"); s != "" {
 		name = s
 	} else {
 		out, err := cfg.CmdOutput("git", "rev-parse", "--abbrev-ref", "HEAD")
 		if err != nil {
-			return Out{}, errors.Wrap(err, "set SPACE or CONDUCTOR_SPACE env var, or run in a git repo")
+			return Out{}, errors.Wrap(err, "set SPACE or CONDUCTOR_WORKSPACE_NAME env var, or run in a git repo")
 		}
 		branch := strings.ReplaceAll(strings.TrimSpace(out), "/", "-")
 		name = filepath.Base(dir) + "-" + branch
