@@ -552,9 +552,6 @@ func (s *Server) handleEnvImport(c echo.Context) error {
 func (s *Server) handleOAuthBounce(c echo.Context) error {
 	state := c.QueryParam("state")
 	space, appState, ok := strings.Cut(state, "|")
-	if !ok || space == "" {
-		return c.String(http.StatusBadRequest, "missing space in oauth state")
-	}
 
 	q := url.Values{}
 	for k, vs := range c.QueryParams() {
@@ -565,9 +562,15 @@ func (s *Server) handleOAuthBounce(c echo.Context) error {
 			q.Add(k, v)
 		}
 	}
-	q.Set("state", appState)
 
-	target := fmt.Sprintf("http://%s.localhost:%d/auth/callback?%s", space, s.config.DashboardPort, q.Encode())
+	if ok && space != "" {
+		q.Set("state", appState)
+		target := fmt.Sprintf("http://%s.localhost:%d/auth/callback?%s", space, s.config.DashboardPort, q.Encode())
+		return c.Redirect(http.StatusTemporaryRedirect, target)
+	}
+
+	q.Set("state", state)
+	target := fmt.Sprintf("http://localhost:%d/auth/callback?%s", s.config.DashboardPort, q.Encode())
 	return c.Redirect(http.StatusTemporaryRedirect, target)
 }
 

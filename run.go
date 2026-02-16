@@ -108,12 +108,12 @@ func Run(defaults ...map[string]string) {
 
 	if err := runner.start(resp.Ports.Blue); err != nil {
 		l.Error("initial build failed", "error", err)
-		os.Exit(1)
+		runner.sendLog("error", fmt.Sprintf("initial build failed: %v", err))
+	} else {
+		ports.ReportHealth("unknown")
+		ports.WaitForHealthy(resp.Ports.Blue)
+		ports.ReportHealth("healthy")
 	}
-
-	ports.ReportHealth("unknown")
-	ports.WaitForHealthy(resp.Ports.Blue)
-	ports.ReportHealth("healthy")
 
 	w := watch.New(space.Dir, []string{".envrc", "*.go", "*.sql", "*.templ", "go.mod"}, nil, func(path string) {
 		runner.rebuild(path)
@@ -317,6 +317,7 @@ func ensureInfra(url string) error {
 	slog.Info("starting cheetah")
 
 	install := exec.Command("go", "install", "github.com/housecat-inc/cheetah/cmd/cheetah@latest")
+	install.Env = append(os.Environ(), "GOPROXY=direct")
 	install.Stdout = os.Stdout
 	install.Stderr = os.Stderr
 	if err := install.Run(); err != nil {
