@@ -117,21 +117,30 @@ const dashboardJS = `<script>
     let h = '<table><thead><tr>' +
       '<th>Space</th><th>App</th><th>Config</th>' +
       '<th>Blue</th><th>Green</th>' +
-      '<th>Health</th><th>Watch</th><th>Logs</th></tr></thead><tbody>';
+      '<th>Watch</th><th>Logs</th></tr></thead><tbody>';
     for (const a of list) {
-      const watch = (a.watch.match || []).map(p => '<code>' + p + '</code>').join(' ');
+      const watchPats = (a.watch.match || []).slice().sort();
+      const wildExts = [], other = [];
+      for (const p of watchPats) {
+        const m = p.match(/^\*\.(\w+)$/);
+        if (m) wildExts.push(m[1]);
+        else other.push(p);
+      }
+      if (wildExts.length > 1) other.unshift('*.{' + wildExts.join(',') + '}');
+      else if (wildExts.length === 1) other.unshift('*.' + wildExts[0]);
+      const watch = other.map(p => '<code>' + p + '</code>').join(' ');
       const parts = (a.dir || '').split('/');
       let appName = parts.pop() || '';
       if (appName === a.space && parts.length > 0) appName = parts.pop() || '';
-      const p1cls = a.ports.active === a.ports.blue ? ' class="active-port"' : '';
-      const p2cls = a.ports.active === a.ports.green ? ' class="active-port"' : '';
+      const healthy = a.health && a.health.status === 'healthy';
+      const p1cls = healthy && a.ports.active === a.ports.blue ? ' class="active-port"' : '';
+      const p2cls = healthy && a.ports.active === a.ports.green ? ' class="active-port"' : '';
       h += '<tr>' +
         '<td><strong><a href="' + location.protocol + '//' + a.space + '.localhost:' + location.port + '/">' + a.space + '</a></strong></td>' +
         '<td><code>' + appName + '</code></td>' +
         '<td>' + (a.config || []).map(c => '<code>' + c + '</code>').join(' ') + '</td>' +
         '<td' + p1cls + '>:' + a.ports.blue + '</td>' +
         '<td' + p2cls + '>:' + a.ports.green + '</td>' +
-        '<td>' + (a.health && a.health.status || '') + '</td>' +
         '<td>' + watch + '</td>' +
         '<td>' + (a.logs || []).length + '</td></tr>';
     }
@@ -206,7 +215,7 @@ const dashboardJS = `<script>
 
   function renderEnv() {
     const groups = Object.keys(envData).sort();
-    let h = '<h2>Environment <button class="env-btn" onclick="addEnvGroup()">+ App</button> <button class="env-btn" onclick="showImportModal()">Import</button></h2>';
+    let h = '<h2>Configs <button class="env-btn" onclick="addEnvGroup()">+ App</button> <button class="env-btn" onclick="showImportModal()">Import</button></h2>';
     if (groups.length === 0) {
       h += '<div class="empty">No environment variables configured.</div>';
       envSection.innerHTML = h;
@@ -265,28 +274,77 @@ const dashboardJS = `<script>
     renderEnv();
   };
 
-  function showFlash(msg) {
+  function showFlash(msg, opts) {
+    opts = opts || {};
     var el = document.createElement("div");
-    el.style.cssText = "position:fixed;top:1rem;right:1rem;background:#1a1a2e;border:1px solid #4ade80;color:#4ade80;padding:0.6rem 1.2rem;border-radius:6px;font:0.85rem system-ui;z-index:10001;";
-    el.textContent = msg;
+    el.style.cssText = "position:fixed;top:1rem;right:1rem;background:#1a1a2e;border:1px solid #4ade80;color:#4ade80;padding:0.6rem 1.2rem;border-radius:6px;font:0.85rem/1.6 system-ui;z-index:10001;display:flex;align-items:flex-start;gap:0.75rem;max-width:400px;";
+    var text = document.createElement("div");
+    text.innerHTML = msg;
+    el.appendChild(text);
+    var close = document.createElement("button");
+    close.textContent = "\u00d7";
+    close.style.cssText = "background:none;border:none;color:#4ade80;font-size:1.2rem;cursor:pointer;padding:0;line-height:1;flex-shrink:0;";
+    close.onclick = function() { el.remove(); };
+    el.appendChild(close);
     document.body.appendChild(el);
-    setTimeout(function() { el.style.opacity = "0"; el.style.transition = "opacity 0.3s"; setTimeout(function() { el.remove(); }, 300); }, 2000);
+    if (!opts.sticky) {
+      setTimeout(function() { el.style.opacity = "0"; el.style.transition = "opacity 0.3s"; setTimeout(function() { el.remove(); }, 300); }, 2000);
+    }
+  }
+
+  var passphraseWords = [
+    "acorn","alpine","amber","anchor","apple","arrow","atlas","autumn",
+    "badge","baker","barn","basin","beach","beacon","birch","blade",
+    "bloom","bluff","board","bolt","bonus","booth","brave","breeze",
+    "brick","bridge","brook","brush","cabin","cairn","candy","cargo",
+    "cedar","chalk","chase","chess","chief","cider","claim","cliff",
+    "cloud","clover","coach","coast","coral","crane","creek","crest",
+    "crown","crystal","curve","dagger","daisy","dawn","delta","depot",
+    "diver","dock","drift","drum","dune","eagle","ember","entry",
+    "epoch","fable","falcon","fern","ferry","field","finch","flame",
+    "flare","flask","flint","flora","forge","frost","gale","garden",
+    "gate","gem","ghost","glade","gleam","globe","gorge","grain",
+    "grove","guild","haven","hawk","hazel","hearth","hedge","heron",
+    "honey","hover","ivory","jade","jewel","joint","karma","kayak",
+    "lance","latch","lemon","light","lilac","linen","lodge","lunar",
+    "maple","marsh","mason","medal","melon","mesa","midge","mirth",
+    "moose","mound","noble","north","novel","oasis","olive","orbit",
+    "otter","oxide","panda","patch","pearl","pebble","penny","perch",
+    "pilot","pine","plank","plaza","plume","polar","pond","prism",
+    "pulse","quail","quarry","quest","quilt","raven","ridge","river",
+    "robin","rover","royal","sage","scale","scout","shaft","shell",
+    "shore","shrub","silk","slate","slope","solar","spark","spire",
+    "spray","stamp","steel","stone","storm","stove","surge","swift",
+    "table","talon","thorn","tidal","tiger","torch","tower","trail",
+    "tulip","umbra","unity","valve","vault","velvet","verse","vigor",
+    "viola","vivid","waltz","wheat","whirl","willow","woven","yacht",
+    "yield","zebra","zephyr","zone"
+  ];
+
+  window.generatePassphrase = function() {
+    var arr = new Uint32Array(4);
+    crypto.getRandomValues(arr);
+    return Array.from(arr).map(function(n) { return passphraseWords[n % passphraseWords.length]; }).join(" ");
   }
 
   window.showExportModal = function(app) {
+    var phrase = generatePassphrase();
     var overlay = document.createElement("div");
     overlay.className = "env-modal-overlay";
     overlay.innerHTML = '<div class="env-modal">' +
       '<h3>Export: ' + app + '</h3>' +
-      '<label>Passphrase</label>' +
-      '<input type="password" id="export-pass" placeholder="Enter a shared passphrase" aria-label="Export passphrase" />' +
+      '<label>Passphrase <span style="color:#666;font-size:0.8rem">(share separately with your teammate)</span></label>' +
+      '<div style="display:flex;gap:0.5rem;margin-bottom:0.75rem">' +
+      '<input type="text" id="export-pass" value="' + phrase + '" aria-label="Export passphrase" style="margin-bottom:0" data-1p-ignore autocomplete="off" />' +
+      '<button class="env-btn" onclick="document.getElementById(\'export-pass\').value=generatePassphrase()" style="white-space:nowrap" aria-label="Regenerate passphrase">&#x21bb;</button>' +
+      '</div>' +
       '<div class="env-error" id="export-error"></div>' +
       '<div class="env-modal-actions">' +
       '<button class="env-btn" onclick="this.closest(\'.env-modal-overlay\').remove()">Cancel</button>' +
       '<button class="env-btn" onclick="doExport(\'' + app + '\')">Export &amp; Copy</button>' +
       '</div></div>';
     document.body.appendChild(overlay);
-    overlay.querySelector("#export-pass").focus();
+    overlay.querySelector("#export-pass").select();
     overlay.addEventListener("click", function(e) { if (e.target === overlay) overlay.remove(); });
   };
 
@@ -303,7 +361,7 @@ const dashboardJS = `<script>
       if (data.error) { errEl.textContent = data.error; return; }
       navigator.clipboard.writeText(data.blob).then(function() {
         document.querySelector(".env-modal-overlay").remove();
-        showFlash("Encrypted config copied to clipboard");
+        showFlash("Encrypted config copied to clipboard<br>Passphrase: <code style=\"background:#0a0a0a;padding:2px 6px;border-radius:4px;color:#e0e0e0\">" + pass + "</code>", {sticky: true});
       }).catch(function() {
         errEl.textContent = "";
         var modal = document.querySelector(".env-modal");
@@ -324,7 +382,7 @@ const dashboardJS = `<script>
       '<label>Encrypted blob</label>' +
       '<textarea id="import-blob" placeholder="Paste the cheetah:v1:... blob here" aria-label="Encrypted config blob"></textarea>' +
       '<label>Passphrase</label>' +
-      '<input type="password" id="import-pass" placeholder="Enter the shared passphrase" aria-label="Import passphrase" />' +
+      '<input type="text" id="import-pass" placeholder="Enter the shared passphrase" aria-label="Import passphrase" data-1p-ignore autocomplete="off" />' +
       '<div class="env-error" id="import-error"></div>' +
       '<div class="env-modal-actions">' +
       '<button class="env-btn" onclick="this.closest(\'.env-modal-overlay\').remove()">Cancel</button>' +
