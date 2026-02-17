@@ -2,7 +2,7 @@
 
 When agentic coding a fast dev/test/build/run cycle is a super power for iterating on many ideas at once.
 
-Cheetah provides a drop-in harness for developing many apps / worktrees at once with config vars, fast server rebuilds, database provisioning, and error feedback.
+Cheetah provides a drop-in harness for developing many apps / worktrees at once with config var management, fast server rebuilds, database provisioning, and error feedback.
 
 ## Quick Start
 
@@ -30,7 +30,7 @@ Cheetah works with apps that follow twelve-factor conventions:
 - code: `$SPACE` and git worktree dir with branch name
 - dependency manifest: `go.mod`
 - config: `.envrc` and `direnv`
-- backing services: multi-tenant postgres; detect `sqlc.yaml schema`, migrate a template database once, then create many `$DATABASE_URL` for dev and test envs
+- backing services: multi-tenant postgres; detect `sqlc.yaml schema`, migrate a `$DATABASE_TEMPLATE_URL` once, then create many `$DATABASE_URL` for dev and test envs
 - build: watch files; ignore `.gitignore`, `DO NOT EDIT` comment; run `go generate`, `go build cmd/app`
 - port: `$PORT` with blue/green deploys and OAuth bouncer
 - disposability: `/health` endpoint
