@@ -17,6 +17,7 @@ import (
 	"github.com/housecat-inc/cheetah/pkg/api"
 	"github.com/housecat-inc/cheetah/pkg/config"
 	"github.com/housecat-inc/cheetah/pkg/pg"
+	"github.com/housecat-inc/cheetah/pkg/version"
 )
 
 var (
@@ -26,6 +27,11 @@ var (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "version" {
+		fmt.Println(version.Get())
+		return
+	}
+
 	logger := slog.New(tint.NewHandler(os.Stderr, &tint.Options{Level: slog.LevelInfo, TimeFormat: time.Kitchen}))
 	slog.SetDefault(logger)
 
@@ -42,8 +48,10 @@ func main() {
 	}
 	srv.SetPostgres(true, pgURL)
 
-	stateFile := filepath.Join(".cheetah", "state.json")
-	os.MkdirAll(".cheetah", 0o755)
+	home, _ := os.UserHomeDir()
+	cheetahDir := filepath.Join(home, ".cheetah")
+	os.MkdirAll(cheetahDir, 0o755)
+	stateFile := filepath.Join(cheetahDir, "state.json")
 	srv.LoadState(stateFile)
 
 	e := echo.New()
