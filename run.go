@@ -309,14 +309,25 @@ func (r *appRunner) envReload(vars map[string]string) {
 
 func ensureInfra(url string) error {
 	c := &http.Client{Timeout: 1 * time.Second}
-	if resp, err := c.Get(url + "/api/status"); err == nil {
-		resp.Body.Close()
+	latest := latestVersion()
+	status, err := checkStatus(c, url)
+	running := err == nil
+
+	if running && (latest == "" || latest == status.Version) {
 		return nil
 	}
 
-	slog.Info("starting cheetah")
+	if running {
+		slog.Info("updating cheetah", "from", status.Version, "to", latest)
+	} else {
+		slog.Info("starting cheetah")
+	}
 
-	install := exec.Command("go", "install", "github.com/housecat-inc/cheetah/cmd/cheetah@latest")
+	ref := "@latest"
+	if latest != "" {
+		ref = "@" + latest
+	}
+	install := exec.Command("go", "install", "github.com/housecat-inc/cheetah/cmd/cheetah"+ref)
 	install.Env = append(os.Environ(), "GOPROXY=direct")
 	install.Stdout = os.Stdout
 	install.Stderr = os.Stderr
@@ -324,6 +335,15 @@ func ensureInfra(url string) error {
 		return errors.Wrap(err, "go install cheetah")
 	}
 
+	if running {
+		exec.Command("cheetah", "stop").Run()
+		time.Sleep(time.Second)
+	}
+
+	return startCheetah(c, url)
+}
+
+func startCheetah(c *http.Client, url string) error {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return errors.Wrap(err, "user home dir")
@@ -346,14 +366,42 @@ func ensureInfra(url string) error {
 	}
 	logFile.Close()
 
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+
 	for i := 0; i < 60; i++ {
 		time.Sleep(500 * time.Millisecond)
-		if resp, err := c.Get(url + "/api/status"); err == nil {
-			resp.Body.Close()
+		select {
+		case err := <-exited:
+			return errors.Wrap(err, "cheetah process exited")
+		default:
+		}
+		if _, err := checkStatus(c, url); err == nil {
 			slog.Info("cheetah ready")
 			return nil
 		}
 	}
 
 	return errors.New("cheetah did not become ready")
+}
+
+func checkStatus(c *http.Client, url string) (api.Status, error) {
+	resp, err := c.Get(url + "/api/status")
+	if err != nil {
+		return api.Status{}, err
+	}
+	defer resp.Body.Close()
+	var status api.Status
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		return api.Status{}, err
+	}
+	return status, nil
+}
+
+func latestVersion() string {
+	out, err := exec.Command("go", "list", "-m", "-f", "{{.Version}}", "github.com/housecat-inc/cheetah@latest").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
