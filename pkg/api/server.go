@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/housecat-inc/cheetah/pkg/code"
+	"github.com/housecat-inc/cheetah/pkg/version"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 )
@@ -43,6 +44,7 @@ type Server struct {
 	startTime       time.Time
 	subMu           sync.Mutex
 	subscribers     map[chan []byte]struct{}
+	version         string
 }
 
 func NewServer(cfg ServerConfig, logger *slog.Logger) *Server {
@@ -54,6 +56,7 @@ func NewServer(cfg ServerConfig, logger *slog.Logger) *Server {
 		nextPort1:   cfg.BluePortStart,
 		startTime:   time.Now(),
 		subscribers: make(map[chan []byte]struct{}),
+		version:     version.Get(),
 	}
 }
 
@@ -265,6 +268,7 @@ func (s *Server) status() Status {
 		PostgresRunning: s.postgresRunning,
 		PostgresURL:     s.postgresURL,
 		Uptime:          time.Since(s.startTime).Truncate(time.Second).String(),
+		Version:         s.version,
 	}
 }
 
@@ -550,27 +554,13 @@ func (s *Server) handleEnvImport(c echo.Context) error {
 // OAuth bouncer
 
 func (s *Server) handleOAuthBounce(c echo.Context) error {
-	state := c.QueryParam("state")
-	space, appState, ok := strings.Cut(state, "|")
-
-	q := url.Values{}
-	for k, vs := range c.QueryParams() {
-		for _, v := range vs {
-			if k == "state" {
-				continue
-			}
-			q.Add(k, v)
-		}
+	space, _, ok := s.activeTarget()
+	if !ok {
+		return c.String(http.StatusBadGateway, "no app registered to handle OAuth callback")
 	}
 
-	if ok && space != "" {
-		q.Set("state", appState)
-		target := fmt.Sprintf("http://%s.localhost:%d/auth/callback?%s", space, s.config.DashboardPort, q.Encode())
-		return c.Redirect(http.StatusTemporaryRedirect, target)
-	}
-
-	q.Set("state", state)
-	target := fmt.Sprintf("http://localhost:%d/auth/callback?%s", s.config.DashboardPort, q.Encode())
+	q := c.QueryParams()
+	target := fmt.Sprintf("http://%s.localhost:%d/auth/callback?%s", space, s.config.DashboardPort, q.Encode())
 	return c.Redirect(http.StatusTemporaryRedirect, target)
 }
 
@@ -603,7 +593,7 @@ func (s *Server) handleProxy(c echo.Context) error {
 			injected := strings.Replace(
 				string(body),
 				"</body>",
-				fmt.Sprintf(`<script src="//cheetah.localhost:%d/spaces.js" data-space="%s" data-port="%d"></script>`+"\n</body>", s.config.DashboardPort, space, port),
+				fmt.Sprintf(`<script src="//cheetah.localhost:%d/spaces.js" data-space="%s" data-port="%d" data-version="%s"></script>`+"\n</body>", s.config.DashboardPort, space, port, s.version),
 				1,
 			)
 			resp.Body = io.NopCloser(bytes.NewReader([]byte(injected)))
@@ -623,6 +613,7 @@ const spacesJS = `(function() {
   const script = document.currentScript;
   const space = script?.getAttribute("data-space") || "";
   const initialPort = script?.getAttribute("data-port") || "";
+  const version = script?.getAttribute("data-version") || "";
 
   const el = document.createElement("div");
   el.id = "__cheetah";
@@ -711,6 +702,10 @@ const spacesJS = `(function() {
     h += '<a class="__sc-item' + scActive + '" href="//cheetah.localhost:' + location.port + '/">' +
       '<span class="__sc-dot healthy"></span>cheetah' +
       '<span class="info">:' + location.port + '</span></a>';
+    if (version) {
+      h += '<div class="__sc-sep"></div>';
+      h += '<div class="__sc-item" style="color:#888;cursor:default;font-size:11px;">' + version + '</div>';
+    }
     menu.innerHTML = h;
   }
 

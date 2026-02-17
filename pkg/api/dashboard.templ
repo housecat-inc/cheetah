@@ -67,11 +67,12 @@ templ Dashboard(port int, status Status) {
 					Postgres :{ fmt.Sprint(status.PostgresPort) }
 				</span>
 				<span>Apps: <span id="app-count">{ fmt.Sprint(status.AppCount) }</span></span>
+				<span style="margin-left:auto; color:#888; font-size:0.85rem;">{ status.Version }</span>
 			</div>
 			<div id="app-table"></div>
 			<div id="env-section"></div>
 			@templ.Raw(dashboardJS)
-			<script src="/spaces.js" data-space="cheetah" data-port={ fmt.Sprint(port) }></script>
+			<script src="/spaces.js" data-space="cheetah" data-port={ fmt.Sprint(port) } data-version={ status.Version }></script>
 		</body>
 	</html>
 }

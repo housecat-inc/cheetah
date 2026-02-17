@@ -10,10 +10,16 @@ Add a `main.go` with `cheetah.Run()` to your app. Now you, your team, and your a
 
 Cheetah coordinates a single multi-tenant HTTP proxy and Postgres database for all environments.
 
+Access your app at `http://localhost:50000` or `https://$SPACE.localhost:50000`. The former serves the latest registered app and serves as convention for OAuth redirects. The latter lets you access multiple apps at the same time.
+
+Cheetah also coordinates app config vars and backing services:
+
 - `SPACE`: unique friendly name, e.g. `little-rock` or worktree branch derived `nzoschke-add-notes`
 - `PORT`: one of two ports to bind to for "blue / green deployment" pattern
 - `DATABASE_TEMPLATE_URL`: database with migrations pre-applied e.g. `postgres://localhost:54320/t_abc123`
 - `DATABASE_URL`: copy of template database for the space, e.g. `postgres://localhost:54320/little-rock`
+
+It will also inject any global app config configured through the dashboard.
 
 Cheetah works with apps that follow twelve-factor conventions:
 
