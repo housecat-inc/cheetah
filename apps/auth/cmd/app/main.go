@@ -74,8 +74,7 @@ func main() {
 		nonces[nonce] = true
 		mu.Unlock()
 
-		state := space + "|" + nonce
-		http.Redirect(w, r, oauthCfg.AuthCodeURL(state), http.StatusTemporaryRedirect)
+		http.Redirect(w, r, oauthCfg.AuthCodeURL(nonce), http.StatusTemporaryRedirect)
 	})
 
 	http.HandleFunc("/auth/callback", func(w http.ResponseWriter, r *http.Request) {

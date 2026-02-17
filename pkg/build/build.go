@@ -33,8 +33,11 @@ func Generate() error {
 }
 
 func Run(in In) (Out, error) {
-	binPath := filepath.Join(".cheetah", "app")
-	os.MkdirAll(".cheetah", 0o755)
+	binDir, err := os.MkdirTemp("", "cheetah-build-*")
+	if err != nil {
+		return Out{}, errors.Wrap(err, "create temp dir")
+	}
+	binPath := filepath.Join(binDir, "app")
 
 	if err := Generate(); err != nil {
 		return Out{}, err

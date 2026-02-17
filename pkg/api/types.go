@@ -42,6 +42,7 @@ type Status struct {
 	PostgresRunning bool   `json:"postgres_running"`
 	PostgresURL     string `json:"postgres_url"`
 	Uptime          string `json:"uptime"`
+	Version         string `json:"version"`
 }
 
 type AppIn struct {

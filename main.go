@@ -72,7 +72,7 @@ func main() {
 	logger.Info("shutdown complete")
 }
 
-var binPath = filepath.Join(".cheetah", "cheetah")
+var binPath string
 
 type proxyRunner struct {
 	logger *slog.Logger
@@ -88,7 +88,13 @@ func (r *proxyRunner) start() error {
 }
 
 func (r *proxyRunner) buildAndStartLocked() error {
-	os.MkdirAll(".cheetah", 0o755)
+	if binPath == "" {
+		dir, err := os.MkdirTemp("", "cheetah-dev-*")
+		if err != nil {
+			return errors.Wrap(err, "create temp dir")
+		}
+		binPath = filepath.Join(dir, "cheetah")
+	}
 
 	if err := build.Generate(); err != nil {
 		return err

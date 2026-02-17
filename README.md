@@ -2,25 +2,35 @@
 
 When agentic coding a fast dev/test/build/run cycle is a super power for iterating on many ideas at once.
 
-Cheetah provides a drop-in harness for developing many apps / worktrees at once with fast server rebuilds, database provisioning and error feedback.
+Cheetah provides a drop-in harness for developing many apps / worktrees at once with config var management, fast server rebuilds, database provisioning, and error feedback.
 
 ## Quick Start
 
-Add a `main.go` with `cheetah.Run()` to your app. Now you, your team, and your agents can run `go run main.go` to develop many copies of the app in parallel.
+Add a `main.go` with `cheetah.Run()` to your app root. Now you, your team, and your agents can run `go run main.go` to develop many copies of the app in parallel.
 
-Cheetah coordinates a single multi-tenant HTTP proxy and Postgres database for all environments.
+Cheetah coordinates a single multi-tenant HTTP proxy, a backing Postgres service, and app config vars. 
+
+Access your app at `http://localhost:50000` or `https://$SPACE.localhost:50000`. The former serves the latest registered app and serves as convention for OAuth redirects. The latter lets you switch across multiple apps at the same time.
+
+Access your Postgres database at `DATABASE_URL` or `DATABASE_TEMPLATE_URL`. The latter has migrations pre-applied making it instant to create more isolated databases for testing.
+
+Access your app config through environment variables. You can import / export / copy / paste global app config in the Cheetah dashboard. You can override this with `.envrc` files, or provide defaults in `.envrc.example` or `cheetah.Run(config)`. 
+
+Cheetah also injects these config vars:
 
 - `SPACE`: unique friendly name, e.g. `little-rock` or worktree branch derived `nzoschke-add-notes`
 - `PORT`: one of two ports to bind to for "blue / green deployment" pattern
 - `DATABASE_TEMPLATE_URL`: database with migrations pre-applied e.g. `postgres://localhost:54320/t_abc123`
 - `DATABASE_URL`: copy of template database for the space, e.g. `postgres://localhost:54320/little-rock`
 
+## Twelve Factors
+
 Cheetah works with apps that follow twelve-factor conventions:
 
 - code: `$SPACE` and git worktree dir with branch name
 - dependency manifest: `go.mod`
 - config: `.envrc` and `direnv`
-- backing services: multi-tenant postgres; detect `sqlc.yaml schema`, migrate a template database once, then create many `$DATABASE_URL` for dev and test envs
+- backing services: multi-tenant postgres; detect `sqlc.yaml schema`, migrate a `$DATABASE_TEMPLATE_URL` once, then create many `$DATABASE_URL` for dev and test envs
 - build: watch files; ignore `.gitignore`, `DO NOT EDIT` comment; run `go generate`, `go build cmd/app`
 - port: `$PORT` with blue/green deploys and OAuth bouncer
 - disposability: `/health` endpoint
