@@ -27,9 +27,15 @@ var (
 )
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "version" {
-		fmt.Println(version.Get())
-		return
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "stop":
+			stop()
+			return
+		case "version":
+			fmt.Println(version.Get())
+			return
+		}
 	}
 
 	logger := slog.New(tint.NewHandler(os.Stderr, &tint.Options{Level: slog.LevelInfo, TimeFormat: time.Kitchen}))
@@ -51,6 +57,8 @@ func main() {
 	home, _ := os.UserHomeDir()
 	cheetahDir := filepath.Join(home, ".cheetah")
 	os.MkdirAll(cheetahDir, 0o755)
+	pidFile := filepath.Join(cheetahDir, "cheetah.pid")
+	os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", os.Getpid())), 0o644)
 	stateFile := filepath.Join(cheetahDir, "state.json")
 	srv.LoadState(stateFile)
 
@@ -62,17 +70,22 @@ func main() {
 
 	go srv.PeriodicSave(stateFile, 5*time.Second)
 
+	startErr := make(chan error, 1)
 	go func() {
 		addr := fmt.Sprintf(":%d", dashboardPort)
 		logger.Info("cheetah", "url", fmt.Sprintf("http://localhost:%d", dashboardPort))
 		if err := e.Start(addr); err != nil && err != http.ErrServerClosed {
 			logger.Error("server error", "error", err)
+			startErr <- err
 		}
 	}()
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
+	select {
+	case <-quit:
+	case <-startErr:
+	}
 	logger.Info("shutting down")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -82,6 +95,35 @@ func main() {
 		logger.Error("server shutdown error", "error", err)
 	}
 	srv.SaveState(stateFile)
+	os.Remove(pidFile)
 	pg.Stop(postgresPort)
 	logger.Info("shutdown complete")
+}
+
+func stop() {
+	home, _ := os.UserHomeDir()
+	pidFile := filepath.Join(home, ".cheetah", "cheetah.pid")
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "cheetah is not running")
+		os.Exit(1)
+	}
+
+	var pid int
+	fmt.Sscanf(string(data), "%d", &pid)
+
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "cheetah is not running")
+		os.Remove(pidFile)
+		os.Exit(1)
+	}
+
+	if err := proc.Signal(syscall.SIGTERM); err != nil {
+		fmt.Fprintln(os.Stderr, "cheetah is not running")
+		os.Remove(pidFile)
+		os.Exit(1)
+	}
+
+	fmt.Println("cheetah stopped")
 }
