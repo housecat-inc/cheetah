@@ -1,9 +1,11 @@
 package cheetah
 
 import (
+	"fmt"
 	"os"
 	"testing"
 
+	"github.com/housecat-inc/cheetah/pkg/config"
 	"github.com/housecat-inc/cheetah/pkg/pg"
 )
 
@@ -12,7 +14,8 @@ func TestDB(t testing.TB) string {
 	if tmplURL == "" {
 		dbURL := os.Getenv("DATABASE_URL")
 		if dbURL == "" {
-			t.Skip("DATABASE_TEMPLATE_URL and DATABASE_URL not set")
+			port := config.EnvOr("PG_PORT", 54320)
+			dbURL = fmt.Sprintf("postgres://postgres:postgres@localhost:%d/postgres?sslmode=disable", port)
 		}
 
 		var err error
