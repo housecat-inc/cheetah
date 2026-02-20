@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -26,15 +29,46 @@ var (
 	postgresPort  = config.EnvOr("PG_PORT", 54320)
 )
 
+func usage() {
+	fmt.Fprintf(os.Stderr, `cheetah %s — development dashboard
+
+Usage:
+  cheetah [flags] [command]
+
+Commands:
+  status    Show cheetah and postgres status
+  stop      Stop the running cheetah daemon
+  update    Update cheetah to the latest version
+  version   Print version
+
+Flags:
+  -h, --help      Show this help
+  -v, --version   Print version
+`, version.Get())
+}
+
 func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
+		case "-h", "--help", "help":
+			usage()
+			return
+		case "-v", "--version", "version":
+			fmt.Println(version.Get())
+			return
+		case "status":
+			status()
+			return
 		case "stop":
 			stop()
 			return
-		case "version":
-			fmt.Println(version.Get())
+		case "update":
+			update()
 			return
+		default:
+			fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", os.Args[1])
+			usage()
+			os.Exit(1)
 		}
 	}
 
@@ -100,30 +134,98 @@ func main() {
 	logger.Info("shutdown complete")
 }
 
-func stop() {
-	home, _ := os.UserHomeDir()
-	pidFile := filepath.Join(home, ".cheetah", "cheetah.pid")
-	data, err := os.ReadFile(pidFile)
+func status() {
+	url := fmt.Sprintf("http://localhost:%d/api/status", dashboardPort)
+	client := &http.Client{Timeout: time.Second}
+
+	resp, err := client.Get(url)
 	if err != nil {
+		fmt.Printf("cheetah:  stopped\n")
+		fmt.Printf("postgres: %s\n", pgStatus())
+		fmt.Printf("version:  %s\n", version.Get())
+		return
+	}
+	defer resp.Body.Close()
+
+	var s api.Status
+	if err := json.NewDecoder(resp.Body).Decode(&s); err != nil {
+		fmt.Printf("cheetah:  running (http://localhost:%d)\n", dashboardPort)
+		fmt.Printf("postgres: unknown\n")
+		fmt.Printf("version:  %s\n", version.Get())
+		return
+	}
+
+	fmt.Printf("cheetah:  running (http://localhost:%d)\n", dashboardPort)
+	if s.PostgresRunning {
+		fmt.Printf("postgres: running (localhost:%d)\n", s.PostgresPort)
+	} else {
+		fmt.Printf("postgres: stopped\n")
+	}
+	fmt.Printf("apps:     %d\n", s.AppCount)
+	fmt.Printf("uptime:   %s\n", s.Uptime)
+	fmt.Printf("version:  %s\n", s.Version)
+}
+
+func pgStatus() string {
+	if pg.Dial() {
+		return fmt.Sprintf("running (localhost:%d)", postgresPort)
+	}
+	return "stopped"
+}
+
+func stop() {
+	pid := findPID()
+	if pid == 0 {
 		fmt.Fprintln(os.Stderr, "cheetah is not running")
 		os.Exit(1)
 	}
 
-	var pid int
-	fmt.Sscanf(string(data), "%d", &pid)
-
 	proc, err := os.FindProcess(pid)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "cheetah is not running")
-		os.Remove(pidFile)
 		os.Exit(1)
 	}
 
 	if err := proc.Signal(syscall.SIGTERM); err != nil {
 		fmt.Fprintln(os.Stderr, "cheetah is not running")
-		os.Remove(pidFile)
 		os.Exit(1)
 	}
 
 	fmt.Println("cheetah stopped")
+}
+
+func findPID() int {
+	home, _ := os.UserHomeDir()
+	pidFile := filepath.Join(home, ".cheetah", "cheetah.pid")
+	if data, err := os.ReadFile(pidFile); err == nil {
+		var pid int
+		fmt.Sscanf(string(data), "%d", &pid)
+		if pid > 0 {
+			if proc, err := os.FindProcess(pid); err == nil {
+				if err := proc.Signal(syscall.Signal(0)); err == nil {
+					return pid
+				}
+			}
+		}
+	}
+
+	out, err := exec.Command("lsof", "-ti", fmt.Sprintf(":%d", dashboardPort)).Output()
+	if err != nil {
+		return 0
+	}
+	var pid int
+	fmt.Sscanf(strings.TrimSpace(string(out)), "%d", &pid)
+	return pid
+}
+
+func update() {
+	fmt.Println("updating cheetah...")
+	cmd := exec.Command("go", "install", "github.com/housecat-inc/cheetah/cmd/cheetah@latest")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "update failed: %s\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("cheetah updated to latest version")
 }

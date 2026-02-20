@@ -107,6 +107,10 @@ func Stop(p int) {
 	proc.Signal(syscall.SIGKILL)
 }
 
+func Dial() bool {
+	return dial()
+}
+
 func dial() bool {
 	conn, err := net.DialTimeout("tcp", fmt.Sprintf("localhost:%d", port), 500*time.Millisecond)
 	if err != nil {
