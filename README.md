@@ -12,7 +12,7 @@ Cheetah coordinates a single multi-tenant HTTP proxy, a backing Postgres service
 
 Access your app at `http://localhost:50000` or `https://$SPACE.localhost:50000`. The former serves the latest registered app and serves as convention for OAuth redirects. The latter lets you switch across multiple apps at the same time.
 
-Access your Postgres database at `DATABASE_URL` or `DATABASE_TEMPLATE_URL`. The latter has migrations pre-applied making it instant to create more isolated databases for testing.
+Access your Postgres database at `DATABASE_URL`. Get a URL to a fresh copy with `cheetah.TestDB()`. Behind the scenes there is a template database with migrations pre-applied making it instant to create isolated databases for dev and testing.
 
 Access your app config through environment variables. You can import / export / copy / paste global app config in the Cheetah dashboard. You can override this with `.envrc` files, or provide defaults in `.envrc.example` or `cheetah.Run(config)`. 
 
@@ -20,7 +20,6 @@ Cheetah also injects these config vars:
 
 - `SPACE`: unique friendly name, e.g. `little-rock` or worktree branch derived `nzoschke-add-notes`
 - `PORT`: one of two ports to bind to for "blue / green deployment" pattern
-- `DATABASE_TEMPLATE_URL`: database with migrations pre-applied e.g. `postgres://localhost:54320/t_abc123`
 - `DATABASE_URL`: copy of template database for the space, e.g. `postgres://localhost:54320/little-rock`
 
 ## Twelve Factors
@@ -30,7 +29,7 @@ Cheetah works with apps that follow twelve-factor conventions:
 - code: `$SPACE` and git worktree dir with branch name
 - dependency manifest: `go.mod`
 - config: `.envrc` and `direnv`
-- backing services: multi-tenant postgres; detect `sqlc.yaml schema`, migrate a `$DATABASE_TEMPLATE_URL` once, then create many `$DATABASE_URL` for dev and test envs
+- backing services: multi-tenant postgres; detect `sqlc.yaml schema`, migrate a template database once, then create many `$DATABASE_URL` for dev and test envs
 - build: watch files; ignore `.gitignore`, `DO NOT EDIT` comment; run `go generate`, `go build cmd/app`
 - port: `$PORT` with blue/green deploys and OAuth bouncer
 - disposability: `/health` endpoint
