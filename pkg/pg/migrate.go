@@ -1,6 +1,7 @@
 package pg
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"fmt"
@@ -20,38 +21,43 @@ import (
 
 const prefix = "t_"
 
-func Ensure(databaseURL string) error {
+func Ensure(databaseURL string) (string, error) {
 	migDirs, err := MigrationDirs(".")
 	if err != nil {
-		return nil
+		return "", nil
 	}
 
 	hash, err := Hash(migDirs)
 	if err != nil {
-		return errors.Wrap(err, "hash migrations")
+		return "", errors.Wrap(err, "hash migrations")
 	}
 
 	adminURL, err := AdminURL(databaseURL)
 	if err != nil {
-		return errors.Wrap(err, "admin url")
+		return "", errors.Wrap(err, "admin url")
 	}
 
 	tmplName, err := Template(adminURL, migDirs, hash)
 	if err != nil {
-		return errors.Wrap(err, "ensure template")
+		return "", errors.Wrap(err, "ensure template")
 	}
 
 	appDBName, err := DBName(databaseURL)
 	if err != nil {
-		return errors.Wrap(err, "db name")
+		return "", errors.Wrap(err, "db name")
 	}
 
 	if err := Create(adminURL, tmplName, appDBName); err != nil {
-		return errors.Wrap(err, "clone db")
+		return "", errors.Wrap(err, "clone db")
+	}
+
+	tmplURL, err := replaceDBName(databaseURL, tmplName)
+	if err != nil {
+		return "", errors.Wrap(err, "template url")
 	}
 
 	slog.Info("database", "template", tmplName, "database_url", databaseURL)
-	return nil
+	return tmplURL, nil
 }
 
 func Hash(paths []string) (string, error) {
@@ -322,5 +328,57 @@ func schemaPaths(v interface{}) []string {
 		}
 		return paths
 	}
+	return nil
+}
+
+func CreateTestDB(templateURL string) (string, func(), error) {
+	adminURL, err := AdminURL(templateURL)
+	if err != nil {
+		return "", nil, errors.Wrap(err, "admin url")
+	}
+
+	tmplName, err := DBName(templateURL)
+	if err != nil {
+		return "", nil, errors.Wrap(err, "template name")
+	}
+
+	b := make([]byte, 6)
+	rand.Read(b)
+	targetName := fmt.Sprintf("test_%x", b)
+
+	if err := Create(adminURL, tmplName, targetName); err != nil {
+		return "", nil, errors.Wrap(err, "create test db")
+	}
+
+	dbURL, err := replaceDBName(templateURL, targetName)
+	if err != nil {
+		return "", nil, errors.Wrap(err, "build url")
+	}
+
+	cleanup := func() {
+		Drop(dbURL)
+	}
+
+	return dbURL, cleanup, nil
+}
+
+func Drop(databaseURL string) error {
+	adminURL, err := AdminURL(databaseURL)
+	if err != nil {
+		return errors.Wrap(err, "admin url")
+	}
+
+	dbName, err := DBName(databaseURL)
+	if err != nil {
+		return errors.Wrap(err, "db name")
+	}
+
+	db, err := sql.Open("postgres", adminURL)
+	if err != nil {
+		return errors.Wrap(err, "connect")
+	}
+	defer db.Close()
+
+	dropDB(db, dbName)
 	return nil
 }

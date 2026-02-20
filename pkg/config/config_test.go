@@ -252,10 +252,10 @@ func TestParseExample(t *testing.T) {
 
 func TestSync(t *testing.T) {
 	tests := []struct {
-		_name  string
-		cmds   map[string]config.CmdResult
-		envrc  bool
-		err    string
+		_name string
+		cmds  map[string]config.CmdResult
+		envrc bool
+		err   string
 	}{
 		{
 			_name: "no envrc skips direnv",
