@@ -93,12 +93,12 @@ func Run(defaults ...map[string]string) {
 		space:      space.Name,
 	}
 
-	testURL, err := pg.Ensure(resp.DatabaseURL)
+	tmplURL, err := pg.Ensure(resp.DatabaseURL)
 	if err != nil {
 		l.Error("database setup failed", "error", err)
 		os.Exit(1)
 	}
-	runner.databaseTemplateURL = testURL
+	runner.databaseTemplateURL = tmplURL
 
 	if err := config.Sync(config.DefaultConfig(), space.Dir); err != nil {
 		l.Warn("config sync failed", "error", err)
@@ -197,13 +197,13 @@ func (r *appRunner) rebuild(changedPath string) {
 
 	if strings.HasSuffix(changedPath, ".sql") {
 		r.logger.Info("migrator", "path", changedPath)
-		testURL, err := pg.Ensure(r.resp.DatabaseURL)
+		tmplURL, err := pg.Ensure(r.resp.DatabaseURL)
 		if err != nil {
 			r.logger.Error("database rebuild failed", "error", err)
 			r.sendLog("error", fmt.Sprintf("database rebuild failed: %v", err))
 			return
 		}
-		r.databaseTemplateURL = testURL
+		r.databaseTemplateURL = tmplURL
 	}
 
 	if !r.ports.Swap(r.start, r.stopPort) {

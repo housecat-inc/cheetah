@@ -8,12 +8,12 @@ import (
 )
 
 func TestDB(t testing.TB) string {
-	testURL := os.Getenv("DATABASE_TEMPLATE_URL")
-	if testURL == "" {
+	tmplURL := os.Getenv("DATABASE_TEMPLATE_URL")
+	if tmplURL == "" {
 		t.Skip("DATABASE_TEMPLATE_URL not set")
 	}
 
-	dbURL, cleanup, err := pg.CreateTestDB(testURL)
+	dbURL, cleanup, err := pg.CreateTestDB(tmplURL)
 	if err != nil {
 		t.Fatalf("create test db: %v", err)
 	}
