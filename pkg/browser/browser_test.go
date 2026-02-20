@@ -62,7 +62,7 @@ func TestDashboardAndProxy(t *testing.T) {
 		proc.Wait()
 	})
 
-	dashURL := fmt.Sprintf("http://cheetah.localhost:%d", testDashPort)
+	dashURL := fmt.Sprintf("http://localhost:%d", testDashPort)
 	waitForReady(t, dashURL+"/api/status")
 
 	resp := registerApp(t, dashURL, "myapp")
