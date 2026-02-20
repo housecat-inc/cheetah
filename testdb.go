@@ -10,7 +10,16 @@ import (
 func TestDB(t testing.TB) string {
 	tmplURL := os.Getenv("DATABASE_TEMPLATE_URL")
 	if tmplURL == "" {
-		t.Skip("DATABASE_TEMPLATE_URL not set")
+		dbURL := os.Getenv("DATABASE_URL")
+		if dbURL == "" {
+			t.Skip("DATABASE_TEMPLATE_URL and DATABASE_URL not set")
+		}
+
+		var err error
+		tmplURL, err = pg.Ensure(dbURL)
+		if err != nil {
+			t.Fatalf("ensure template db: %v", err)
+		}
 	}
 
 	dbURL, cleanup, err := pg.CreateTestDB(tmplURL)
