@@ -135,20 +135,20 @@ func Run(defaults ...map[string]string) {
 }
 
 type appRunner struct {
-	appEnv          map[string]string
-	appName         string
-	cheetahURL      string
-	client          *api.Client
-	cmds            map[int]*exec.Cmd
+	appEnv              map[string]string
+	appName             string
+	cheetahURL          string
+	client              *api.Client
+	cmds                map[int]*exec.Cmd
 	databaseTemplateURL string
-	defs            map[string]string
-	dir             string
-	logger          *slog.Logger
-	mu              sync.Mutex
-	ports           *port.Manager
-	proxyEnv        map[string]string
-	resp            *api.AppOut
-	space           string
+	defs                map[string]string
+	dir                 string
+	logger              *slog.Logger
+	mu                  sync.Mutex
+	ports               *port.Manager
+	proxyEnv            map[string]string
+	resp                *api.AppOut
+	space               string
 }
 
 func (r *appRunner) start(port int) error {
@@ -156,12 +156,12 @@ func (r *appRunner) start(port int) error {
 	defer r.mu.Unlock()
 
 	out, err := build.Run(build.In{
-		AppEnv:          r.appEnv,
-		CheetahURL:      r.cheetahURL,
+		AppEnv:              r.appEnv,
+		CheetahURL:          r.cheetahURL,
 		DatabaseTemplateURL: r.databaseTemplateURL,
-		DatabaseURL:     r.resp.DatabaseURL,
-		Port:            port,
-		Space:           r.space,
+		DatabaseURL:         r.resp.DatabaseURL,
+		Port:                port,
+		Space:               r.space,
 	})
 	if err != nil {
 		return err

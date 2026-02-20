@@ -11,12 +11,12 @@ import (
 )
 
 type In struct {
-	AppEnv          map[string]string
-	CheetahURL      string
+	AppEnv              map[string]string
+	CheetahURL          string
 	DatabaseTemplateURL string
-	DatabaseURL     string
-	Port            int
-	Space           string
+	DatabaseURL         string
+	Port                int
+	Space               string
 }
 
 type Out struct {
