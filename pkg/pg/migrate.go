@@ -22,6 +22,35 @@ import (
 const prefix = "t_"
 
 func Ensure(databaseURL string) (string, error) {
+	tmplURL, err := EnsureTemplate(databaseURL)
+	if err != nil {
+		return "", err
+	}
+
+	adminURL, err := AdminURL(databaseURL)
+	if err != nil {
+		return "", errors.Wrap(err, "admin url")
+	}
+
+	tmplName, err := DBName(tmplURL)
+	if err != nil {
+		return "", errors.Wrap(err, "template name")
+	}
+
+	appDBName, err := DBName(databaseURL)
+	if err != nil {
+		return "", errors.Wrap(err, "db name")
+	}
+
+	if err := Create(adminURL, tmplName, appDBName); err != nil {
+		return "", errors.Wrap(err, "clone db")
+	}
+
+	slog.Info("database", "template", tmplName, "database_url", databaseURL)
+	return tmplURL, nil
+}
+
+func EnsureTemplate(databaseURL string) (string, error) {
 	migDirs, err := MigrationDirs(".")
 	if err != nil {
 		return "", nil
@@ -42,21 +71,11 @@ func Ensure(databaseURL string) (string, error) {
 		return "", errors.Wrap(err, "ensure template")
 	}
 
-	appDBName, err := DBName(databaseURL)
-	if err != nil {
-		return "", errors.Wrap(err, "db name")
-	}
-
-	if err := Create(adminURL, tmplName, appDBName); err != nil {
-		return "", errors.Wrap(err, "clone db")
-	}
-
 	tmplURL, err := replaceDBName(databaseURL, tmplName)
 	if err != nil {
 		return "", errors.Wrap(err, "template url")
 	}
 
-	slog.Info("database", "template", tmplName, "database_url", databaseURL)
 	return tmplURL, nil
 }
 

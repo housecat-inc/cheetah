@@ -2,19 +2,27 @@ package cheetah
 
 import (
 	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/housecat-inc/cheetah/pkg/config"
 	"github.com/housecat-inc/cheetah/pkg/pg"
 )
 
-func TestDB(t testing.TB) string {
-	port := config.EnvOr("PG_PORT", 54320)
-	dbURL := fmt.Sprintf("postgres://postgres:postgres@localhost:%d/postgres?sslmode=disable", port)
+var (
+	tmplOnce sync.Once
+	tmplURL  string
+	tmplErr  error
+)
 
-	tmplURL, err := pg.Ensure(dbURL)
-	if err != nil {
-		t.Fatalf("ensure template db: %v", err)
+func TestDB(t testing.TB) string {
+	tmplOnce.Do(func() {
+		port := config.EnvOr("PG_PORT", 54320)
+		dbURL := fmt.Sprintf("postgres://postgres:postgres@localhost:%d/postgres?sslmode=disable", port)
+		tmplURL, tmplErr = pg.EnsureTemplate(dbURL)
+	})
+	if tmplErr != nil {
+		t.Fatalf("ensure template db: %v", tmplErr)
 	}
 
 	testURL, cleanup, err := pg.CreateTestDB(tmplURL)
