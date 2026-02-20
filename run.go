@@ -79,24 +79,26 @@ func Run(defaults ...map[string]string) {
 	ports := port.New(resp.Ports.Blue, resp.Ports.Green, port.DefaultConfig(client, space.Name))
 
 	runner := &appRunner{
-		appEnv:      cfg.Env,
-		appName:     code.AppName(space.Dir, space.Name),
-		client:      client,
-		cmds:        make(map[int]*exec.Cmd),
-		defs:        defs,
-		dir:         space.Dir,
-		logger:      l,
-		ports:       ports,
-		proxyEnv:    resp.Env,
-		resp:        resp,
-		space:       space.Name,
+		appEnv:     cfg.Env,
+		appName:    code.AppName(space.Dir, space.Name),
 		cheetahURL: url,
+		client:     client,
+		cmds:       make(map[int]*exec.Cmd),
+		defs:       defs,
+		dir:        space.Dir,
+		logger:     l,
+		ports:      ports,
+		proxyEnv:   resp.Env,
+		resp:       resp,
+		space:      space.Name,
 	}
 
-	if err := pg.Ensure(resp.DatabaseURL); err != nil {
+	testURL, err := pg.Ensure(resp.DatabaseURL)
+	if err != nil {
 		l.Error("database setup failed", "error", err)
 		os.Exit(1)
 	}
+	runner.databaseTestURL = testURL
 
 	if err := config.Sync(config.DefaultConfig(), space.Dir); err != nil {
 		l.Warn("config sync failed", "error", err)
@@ -133,19 +135,20 @@ func Run(defaults ...map[string]string) {
 }
 
 type appRunner struct {
-	appEnv      map[string]string
-	appName     string
-	client      *api.Client
-	cmds        map[int]*exec.Cmd
-	defs        map[string]string
-	dir         string
-	logger      *slog.Logger
-	mu          sync.Mutex
-	ports       *port.Manager
-	proxyEnv    map[string]string
-	resp        *api.AppOut
-	space       string
-	cheetahURL string
+	appEnv          map[string]string
+	appName         string
+	cheetahURL      string
+	client          *api.Client
+	cmds            map[int]*exec.Cmd
+	databaseTestURL string
+	defs            map[string]string
+	dir             string
+	logger          *slog.Logger
+	mu              sync.Mutex
+	ports           *port.Manager
+	proxyEnv        map[string]string
+	resp            *api.AppOut
+	space           string
 }
 
 func (r *appRunner) start(port int) error {
@@ -153,11 +156,12 @@ func (r *appRunner) start(port int) error {
 	defer r.mu.Unlock()
 
 	out, err := build.Run(build.In{
-		AppEnv:      r.appEnv,
-		DatabaseURL: r.resp.DatabaseURL,
-		Port:        port,
-		Space:       r.space,
-		CheetahURL: r.cheetahURL,
+		AppEnv:          r.appEnv,
+		CheetahURL:      r.cheetahURL,
+		DatabaseTestURL: r.databaseTestURL,
+		DatabaseURL:     r.resp.DatabaseURL,
+		Port:            port,
+		Space:           r.space,
 	})
 	if err != nil {
 		return err
@@ -193,11 +197,13 @@ func (r *appRunner) rebuild(changedPath string) {
 
 	if strings.HasSuffix(changedPath, ".sql") {
 		r.logger.Info("migrator", "path", changedPath)
-		if err := pg.Ensure(r.resp.DatabaseURL); err != nil {
+		testURL, err := pg.Ensure(r.resp.DatabaseURL)
+		if err != nil {
 			r.logger.Error("database rebuild failed", "error", err)
 			r.sendLog("error", fmt.Sprintf("database rebuild failed: %v", err))
 			return
 		}
+		r.databaseTestURL = testURL
 	}
 
 	if !r.ports.Swap(r.start, r.stopPort) {

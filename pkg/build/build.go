@@ -11,11 +11,12 @@ import (
 )
 
 type In struct {
-	AppEnv      map[string]string
-	DatabaseURL string
-	Port        int
-	Space       string
-	CheetahURL string
+	AppEnv          map[string]string
+	CheetahURL      string
+	DatabaseTestURL string
+	DatabaseURL     string
+	Port            int
+	Space           string
 }
 
 type Out struct {
@@ -61,10 +62,11 @@ func Run(in In) (Out, error) {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
 	}
 	cmd.Env = append(cmd.Env,
+		fmt.Sprintf("CHEETAH_URL=%s", in.CheetahURL),
+		fmt.Sprintf("DATABASE_TEST_URL=%s", in.DatabaseTestURL),
 		fmt.Sprintf("DATABASE_URL=%s", in.DatabaseURL),
 		fmt.Sprintf("PORT=%d", in.Port),
 		fmt.Sprintf("SPACE=%s", in.Space),
-		fmt.Sprintf("CHEETAH_URL=%s", in.CheetahURL),
 	)
 	if err := cmd.Start(); err != nil {
 		return Out{}, errors.Wrap(err, "run")
