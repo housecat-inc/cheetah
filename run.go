@@ -27,7 +27,7 @@ import (
 	"github.com/housecat-inc/cheetah/pkg/watch"
 )
 
-const defaultURL = "http://cheetah.localhost:50000"
+const defaultURL = "http://localhost:50000"
 
 func Run(defaults ...map[string]string) {
 	url := config.EnvOr("CHEETAH_URL", defaultURL)
@@ -313,7 +313,7 @@ func ensureInfra(url string) error {
 	status, err := checkStatus(c, url)
 	running := err == nil
 
-	if running && (latest == "" || latest == status.Version) {
+	if running && (latest == "" || latest == status.Version || status.Version == "dev") {
 		return nil
 	}
 

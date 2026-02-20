@@ -76,7 +76,8 @@ func (s *Server) Middleware(e *echo.Echo) {
 		LogStatus:   true,
 		LogURI:      true,
 		LogValuesFunc: func(c echo.Context, v middleware.RequestLoggerValues) error {
-			if extractSubdomain(c.Request().Host) == "cheetah" {
+			sub := extractSubdomain(c.Request().Host)
+			if sub == "" || sub == "cheetah" {
 				return nil
 			}
 			s.logger.Info("request",
@@ -93,10 +94,10 @@ func (s *Server) Middleware(e *echo.Echo) {
 			if sub == "" && c.Request().URL.Path == "/auth/callback" {
 				return s.handleOAuthBounce(c)
 			}
-			if sub != "cheetah" {
-				return s.handleProxy(c)
+			if sub == "" || sub == "cheetah" {
+				return next(c)
 			}
-			return next(c)
+			return s.handleProxy(c)
 		}
 	})
 }
@@ -569,7 +570,7 @@ func (s *Server) handleOAuthBounce(c echo.Context) error {
 func (s *Server) handleProxy(c echo.Context) error {
 	space, port, ok := s.targetForRequest(c.Request().Host)
 	if !ok {
-		return c.Redirect(http.StatusTemporaryRedirect, fmt.Sprintf("http://cheetah.localhost:%d/", s.config.DashboardPort))
+		return c.Redirect(http.StatusTemporaryRedirect, fmt.Sprintf("http://localhost:%d/", s.config.DashboardPort))
 	}
 
 	target, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", port))
@@ -593,7 +594,7 @@ func (s *Server) handleProxy(c echo.Context) error {
 			injected := strings.Replace(
 				string(body),
 				"</body>",
-				fmt.Sprintf(`<script src="//cheetah.localhost:%d/spaces.js" data-space="%s" data-port="%d" data-version="%s"></script>`+"\n</body>", s.config.DashboardPort, space, port, s.version),
+				fmt.Sprintf(`<script src="//localhost:%d/spaces.js" data-space="%s" data-port="%d" data-version="%s"></script>`+"\n</body>", s.config.DashboardPort, space, port, s.version),
 				1,
 			)
 			resp.Body = io.NopCloser(bytes.NewReader([]byte(injected)))
@@ -699,7 +700,7 @@ const spacesJS = `(function() {
     }
     if (list.length > 0) h += '<div class="__sc-sep"></div>';
     const scActive = space === "cheetah" ? " active" : "";
-    h += '<a class="__sc-item' + scActive + '" href="//cheetah.localhost:' + location.port + '/">' +
+    h += '<a class="__sc-item' + scActive + '" href="//localhost:' + location.port + '/">' +
       '<span class="__sc-dot healthy"></span>cheetah' +
       '<span class="info">:' + location.port + '</span></a>';
     if (version) {
@@ -731,7 +732,7 @@ const spacesJS = `(function() {
     lastPort = String(p);
   }
 
-  const es = new EventSource("//cheetah.localhost:" + location.port + "/api/events");
+  const es = new EventSource("//localhost:" + location.port + "/api/events");
 
   es.addEventListener("init", function(e) {
     const apps = JSON.parse(e.data);
