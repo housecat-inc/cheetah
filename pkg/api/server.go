@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"net/http/httputil"
 	"net/url"
 	"os"
@@ -24,6 +25,8 @@ import (
 )
 
 const maxRecentLogs = 100
+
+var nonceRe = regexp.MustCompile(`<script[^>]+nonce="([^"]+)"`)
 
 type ServerConfig struct {
 	BluePortStart int
@@ -91,7 +94,7 @@ func (s *Server) Middleware(e *echo.Echo) {
 	e.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
 			sub := extractSubdomain(c.Request().Host)
-			if sub == "" && c.Request().URL.Path == "/auth/callback" {
+			if sub == "" && isOAuthCallback(c.Request()) {
 				return s.handleOAuthBounce(c)
 			}
 			if sub == "" || sub == "cheetah" {
@@ -554,6 +557,10 @@ func (s *Server) handleEnvImport(c echo.Context) error {
 
 // OAuth bouncer
 
+func isOAuthCallback(r *http.Request) bool {
+	return strings.Contains(r.URL.Path, "callback") && r.URL.Query().Has("code") && r.URL.Query().Has("state")
+}
+
 func (s *Server) handleOAuthBounce(c echo.Context) error {
 	space, _, ok := s.activeTarget()
 	if !ok {
@@ -561,7 +568,7 @@ func (s *Server) handleOAuthBounce(c echo.Context) error {
 	}
 
 	q := c.QueryParams()
-	target := fmt.Sprintf("http://%s.localhost:%d/auth/callback?%s", space, s.config.DashboardPort, q.Encode())
+	target := fmt.Sprintf("http://%s.localhost:%d%s?%s", space, s.config.DashboardPort, c.Request().URL.Path, q.Encode())
 	return c.Redirect(http.StatusTemporaryRedirect, target)
 }
 
@@ -591,10 +598,18 @@ func (s *Server) handleProxy(c echo.Context) error {
 			if err != nil {
 				return err
 			}
+			nonce := ""
+			if m := nonceRe.FindSubmatch(body); len(m) > 1 {
+				nonce = string(m[1])
+			}
+			scriptAttr := ""
+			if nonce != "" {
+				scriptAttr = fmt.Sprintf(` nonce="%s"`, nonce)
+			}
 			injected := strings.Replace(
 				string(body),
 				"</body>",
-				fmt.Sprintf(`<script src="//localhost:%d/spaces.js" data-space="%s" data-port="%d" data-version="%s"></script>`+"\n</body>", s.config.DashboardPort, space, port, s.version),
+				fmt.Sprintf(`<script%s src="//localhost:%d/spaces.js" data-space="%s" data-port="%d" data-version="%s"></script>`+"\n</body>", scriptAttr, s.config.DashboardPort, space, port, s.version),
 				1,
 			)
 			resp.Body = io.NopCloser(bytes.NewReader([]byte(injected)))

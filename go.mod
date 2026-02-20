@@ -11,6 +11,7 @@ require (
 	github.com/lib/pq v1.10.9
 	github.com/lmittmann/tint v1.1.3
 	github.com/pressly/goose/v3 v3.26.0
+	github.com/rubenv/sql-migrate v1.8.1
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/crypto v0.46.0
 	golang.org/x/oauth2 v0.35.0
@@ -30,6 +31,7 @@ require (
 	github.com/fatih/color v1.16.0 // indirect
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
 	github.com/getsentry/sentry-go v0.27.0 // indirect
+	github.com/go-gorp/gorp/v3 v3.1.0 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/kr/pretty v0.3.1 // indirect

@@ -296,6 +296,51 @@ func TestQuoteIdent(t *testing.T) {
 	}
 }
 
+func TestMigrationFormat(t *testing.T) {
+	tests := []struct {
+		_name string
+		files map[string]string
+		out   string
+	}{
+		{
+			_name: "goose format",
+			files: map[string]string{
+				"001_init.sql": "-- +goose Up\nCREATE TABLE foo (id int);\n-- +goose Down\nDROP TABLE foo;\n",
+			},
+			out: "goose",
+		},
+		{
+			_name: "sql-migrate format",
+			files: map[string]string{
+				"001_init.sql": "-- +migrate Up\nCREATE TABLE foo (id int);\n-- +migrate Down\nDROP TABLE foo;\n",
+			},
+			out: "sql-migrate",
+		},
+		{
+			_name: "no markers defaults to goose",
+			files: map[string]string{
+				"001_init.sql": "CREATE TABLE foo (id int);\n",
+			},
+			out: "goose",
+		},
+		{
+			_name: "empty dir defaults to goose",
+			files: map[string]string{},
+			out:   "goose",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt._name, func(t *testing.T) {
+			a := assert.New(t)
+			dir := t.TempDir()
+			for name, content := range tt.files {
+				os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644)
+			}
+			a.Equal(tt.out, migrationFormat(dir))
+		})
+	}
+}
+
 func TestTemplatePipeline(t *testing.T) {
 	tests := []struct {
 		_name      string
@@ -326,6 +371,14 @@ func TestTemplatePipeline(t *testing.T) {
 				"001_widgets.sql": "-- +goose Up\nCREATE TABLE widgets (id serial PRIMARY KEY, label text NOT NULL);\n-- +goose Down\nDROP TABLE widgets;\n",
 			},
 			tables: []string{"widgets"},
+		},
+		{
+			_name:    "sql-migrate format",
+			sqlcYAML: "sql:\n  - schema: \"sql\"\n",
+			migrations: map[string]string{
+				"001_users.sql": "-- +migrate Up\nCREATE TABLE IF NOT EXISTS users (\n    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),\n    email TEXT NOT NULL,\n    id SERIAL PRIMARY KEY,\n    name TEXT NOT NULL\n);\n-- +migrate Down\nDROP TABLE IF EXISTS users;\n",
+			},
+			tables: []string{"users"},
 		},
 	}
 	for _, tt := range tests {
@@ -365,7 +418,7 @@ func TestTemplatePipeline(t *testing.T) {
 
 			appDB := fmt.Sprintf("test_%s_%s", t.Name(), hash)
 			r.NoError(Create(adminURL, tmplName, appDB))
-			t.Cleanup(func() { dropDB(adminURL, appDB) })
+			t.Cleanup(func() { dropTestDB(adminURL, appDB) })
 
 			appURL, err := replaceDBName(adminURL, appDB)
 			r.NoError(err)
@@ -387,7 +440,7 @@ func TestTemplatePipeline(t *testing.T) {
 	}
 }
 
-func dropDB(pgURL, name string) {
+func dropTestDB(pgURL, name string) {
 	db, err := sql.Open("postgres", pgURL)
 	if err != nil {
 		return

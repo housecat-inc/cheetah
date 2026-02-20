@@ -14,6 +14,7 @@ import (
 	"github.com/cockroachdb/errors"
 	_ "github.com/lib/pq"
 	"github.com/pressly/goose/v3"
+	migrate "github.com/rubenv/sql-migrate"
 	"gopkg.in/yaml.v3"
 )
 
@@ -93,7 +94,7 @@ func Hash(paths []string) (string, error) {
 }
 
 // Template creates a template database named tmpl_{hash} if it doesn't
-// already exist, then runs goose migrations on it. Returns the template DB name.
+// already exist, then runs migrations on it. Returns the template DB name.
 func Template(adminURL string, dirs []string, hash string) (string, error) {
 	name := prefix + hash
 
@@ -128,21 +129,66 @@ func Template(adminURL string, dirs []string, hash string) (string, error) {
 	}
 	defer tmplDB.Close()
 
-	goose.SetDialect("postgres")
 	for _, dir := range dirs {
 		info, err := os.Stat(dir)
 		if err != nil {
+			dropDB(adminDB, name)
 			return "", errors.Wrapf(err, "stat %s", dir)
 		}
 		if !info.IsDir() {
 			continue
 		}
-		if err := goose.Up(tmplDB, dir); err != nil {
+		if err := runMigrations(tmplDB, dir); err != nil {
+			tmplDB.Close()
+			dropDB(adminDB, name)
 			return "", errors.Wrapf(err, "run migrations in %s", dir)
 		}
 	}
 
 	return name, nil
+}
+
+func migrationFormat(dir string) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "goose"
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		content := string(data)
+		if strings.Contains(content, "-- +goose") {
+			return "goose"
+		}
+		if strings.Contains(content, "-- +migrate") {
+			return "sql-migrate"
+		}
+	}
+	return "goose"
+}
+
+func runMigrations(db *sql.DB, dir string) error {
+	switch migrationFormat(dir) {
+	case "sql-migrate":
+		_, err := migrate.Exec(db, "postgres", &migrate.FileMigrationSource{Dir: dir}, migrate.Up)
+		return err
+	default:
+		goose.SetDialect("postgres")
+		return goose.Up(db, dir)
+	}
+}
+
+func dropDB(adminDB *sql.DB, name string) {
+	adminDB.Exec(
+		"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()",
+		name,
+	)
+	adminDB.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS %s", quoteIdent(name)))
 }
 
 // Create drops targetDB if it exists (terminating connections), then creates
