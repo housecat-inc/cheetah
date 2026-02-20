@@ -201,6 +201,34 @@ func TestMigrationDirs(t *testing.T) {
 			out: []string{"migrations"},
 		},
 		{
+			_name: "nested migrations dir",
+			setup: func(dir string) {
+				os.MkdirAll(filepath.Join(dir, "internal", "db", "migrations"), 0o755)
+				os.WriteFile(filepath.Join(dir, "internal", "db", "migrations", "001_init.sql"), []byte("-- +goose Up\nCREATE TABLE foo (id int);\n"), 0o644)
+			},
+			out: []string{filepath.Join("internal", "db", "migrations")},
+		},
+		{
+			_name: "multiple nested migrations dirs",
+			setup: func(dir string) {
+				os.MkdirAll(filepath.Join(dir, "svc-a", "migrations"), 0o755)
+				os.WriteFile(filepath.Join(dir, "svc-a", "migrations", "001.sql"), []byte("-- +goose Up\nCREATE TABLE a (id int);\n"), 0o644)
+				os.MkdirAll(filepath.Join(dir, "svc-b", "migrations"), 0o755)
+				os.WriteFile(filepath.Join(dir, "svc-b", "migrations", "001.sql"), []byte("-- +goose Up\nCREATE TABLE b (id int);\n"), 0o644)
+			},
+			out: []string{filepath.Join("svc-a", "migrations"), filepath.Join("svc-b", "migrations")},
+		},
+		{
+			_name: "sqlc config takes precedence over nested migrations",
+			setup: func(dir string) {
+				os.WriteFile(filepath.Join(dir, "sqlc.yaml"), []byte("sql:\n  - schema: \"sql\"\n"), 0o644)
+				os.MkdirAll(filepath.Join(dir, "sql"), 0o755)
+				os.MkdirAll(filepath.Join(dir, "internal", "db", "migrations"), 0o755)
+				os.WriteFile(filepath.Join(dir, "internal", "db", "migrations", "001.sql"), []byte("-- +goose Up\nCREATE TABLE foo (id int);\n"), 0o644)
+			},
+			out: []string{"sql"},
+		},
+		{
 			_name: "no migration dir",
 			setup: func(dir string) {},
 			err:   true,
@@ -343,10 +371,11 @@ func TestMigrationFormat(t *testing.T) {
 
 func TestTemplatePipeline(t *testing.T) {
 	tests := []struct {
-		_name      string
-		sqlcYAML   string
-		migrations map[string]string
-		tables     []string
+		_name        string
+		migrationDir string
+		migrations   map[string]string
+		sqlcYAML     string
+		tables       []string
 	}{
 		{
 			_name:    "single table",
@@ -373,6 +402,14 @@ func TestTemplatePipeline(t *testing.T) {
 			tables: []string{"widgets"},
 		},
 		{
+			_name:        "nested goose migrations",
+			migrationDir: filepath.Join("internal", "db", "migrations"),
+			migrations: map[string]string{
+				"001_items.sql": "-- +goose Up\nCREATE TABLE items (id serial PRIMARY KEY, name text NOT NULL);\n-- +goose Down\nDROP TABLE items;\n",
+			},
+			tables: []string{"items"},
+		},
+		{
 			_name:    "sql-migrate format",
 			sqlcYAML: "sql:\n  - schema: \"sql\"\n",
 			migrations: map[string]string{
@@ -388,17 +425,17 @@ func TestTemplatePipeline(t *testing.T) {
 
 			dir := t.TempDir()
 
+			migDir := tt.migrationDir
 			if tt.sqlcYAML != "" {
 				r.NoError(os.WriteFile(filepath.Join(dir, "sqlc.yaml"), []byte(tt.sqlcYAML), 0o644))
-				r.NoError(os.MkdirAll(filepath.Join(dir, "sql"), 0o755))
-				for name, content := range tt.migrations {
-					r.NoError(os.WriteFile(filepath.Join(dir, "sql", name), []byte(content), 0o644))
-				}
-			} else {
-				r.NoError(os.MkdirAll(filepath.Join(dir, "migrations"), 0o755))
-				for name, content := range tt.migrations {
-					r.NoError(os.WriteFile(filepath.Join(dir, "migrations", name), []byte(content), 0o644))
-				}
+				migDir = "sql"
+			}
+			if migDir == "" {
+				migDir = "migrations"
+			}
+			r.NoError(os.MkdirAll(filepath.Join(dir, migDir), 0o755))
+			for name, content := range tt.migrations {
+				r.NoError(os.WriteFile(filepath.Join(dir, migDir, name), []byte(content), 0o644))
 			}
 
 			migDirs, err := MigrationDirs(dir)
