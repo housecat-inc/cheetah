@@ -27,6 +27,10 @@ func Ensure(databaseURL string) (string, error) {
 		return "", err
 	}
 
+	if tmplURL == "" {
+		return "", nil
+	}
+
 	adminURL, err := AdminURL(databaseURL)
 	if err != nil {
 		return "", errors.Wrap(err, "admin url")
@@ -301,9 +305,8 @@ func MigrationDirs(dir string) ([]string, error) {
 	}
 
 	if len(paths) == 0 {
-		fallback := filepath.Join(dir, "migrations")
-		if info, err := os.Stat(fallback); err == nil && info.IsDir() {
-			return []string{fallback}, nil
+		if found := findMigrationDirs(dir); len(found) > 0 {
+			return found, nil
 		}
 		return nil, errors.Newf("no migration directory found in %s", dir)
 	}
@@ -313,6 +316,22 @@ func MigrationDirs(dir string) ([]string, error) {
 
 func HasSqlcConfig(dir string) bool {
 	return len(findSqlcConfigs(dir)) > 0
+}
+
+func findMigrationDirs(dir string) []string {
+	var dirs []string
+	filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || !d.IsDir() {
+			return nil
+		}
+		if filepath.Base(path) == "migrations" {
+			dirs = append(dirs, path)
+			return filepath.SkipDir
+		}
+		return nil
+	})
+	sort.Strings(dirs)
+	return dirs
 }
 
 func findSqlcConfigs(dir string) []string {
