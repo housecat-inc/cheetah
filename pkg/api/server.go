@@ -42,6 +42,7 @@ type Server struct {
 	logger          *slog.Logger
 	mu              sync.RWMutex
 	nextPort1       int
+	oauthStates     sync.Map
 	postgresRunning bool
 	postgresURL     string
 	startTime       time.Time
@@ -562,9 +563,16 @@ func isOAuthCallback(r *http.Request) bool {
 }
 
 func (s *Server) handleOAuthBounce(c echo.Context) error {
-	space, _, ok := s.activeTarget()
-	if !ok {
-		return c.String(http.StatusBadGateway, "no app registered to handle OAuth callback")
+	space := ""
+	if v, ok := s.oauthStates.LoadAndDelete(c.QueryParam("state")); ok {
+		space = v.(string)
+	}
+	if space == "" {
+		var ok bool
+		space, _, ok = s.activeTarget()
+		if !ok {
+			return c.String(http.StatusBadGateway, "no app registered to handle OAuth callback")
+		}
 	}
 
 	q := c.QueryParams()
@@ -589,6 +597,14 @@ func (s *Server) handleProxy(c echo.Context) error {
 		},
 		FlushInterval: -1,
 		ModifyResponse: func(resp *http.Response) error {
+			if loc := resp.Header.Get("Location"); resp.StatusCode >= 300 && resp.StatusCode < 400 && loc != "" {
+				if u, err := url.Parse(loc); err == nil {
+					if state := u.Query().Get("state"); state != "" {
+						s.oauthStates.Store(state, space)
+					}
+				}
+			}
+
 			ct := resp.Header.Get("Content-Type")
 			if !strings.Contains(ct, "text/html") {
 				return nil
