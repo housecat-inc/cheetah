@@ -8,9 +8,9 @@ import (
 )
 
 func TestDB(t testing.TB) string {
-	testURL := os.Getenv("DATABASE_TEST_URL")
+	testURL := os.Getenv("DATABASE_TEMPLATE_URL")
 	if testURL == "" {
-		t.Skip("DATABASE_TEST_URL not set")
+		t.Skip("DATABASE_TEMPLATE_URL not set")
 	}
 
 	dbURL, cleanup, err := pg.CreateTestDB(testURL)

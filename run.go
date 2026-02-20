@@ -98,7 +98,7 @@ func Run(defaults ...map[string]string) {
 		l.Error("database setup failed", "error", err)
 		os.Exit(1)
 	}
-	runner.databaseTestURL = testURL
+	runner.databaseTemplateURL = testURL
 
 	if err := config.Sync(config.DefaultConfig(), space.Dir); err != nil {
 		l.Warn("config sync failed", "error", err)
@@ -140,7 +140,7 @@ type appRunner struct {
 	cheetahURL      string
 	client          *api.Client
 	cmds            map[int]*exec.Cmd
-	databaseTestURL string
+	databaseTemplateURL string
 	defs            map[string]string
 	dir             string
 	logger          *slog.Logger
@@ -158,7 +158,7 @@ func (r *appRunner) start(port int) error {
 	out, err := build.Run(build.In{
 		AppEnv:          r.appEnv,
 		CheetahURL:      r.cheetahURL,
-		DatabaseTestURL: r.databaseTestURL,
+		DatabaseTemplateURL: r.databaseTemplateURL,
 		DatabaseURL:     r.resp.DatabaseURL,
 		Port:            port,
 		Space:           r.space,
@@ -203,7 +203,7 @@ func (r *appRunner) rebuild(changedPath string) {
 			r.sendLog("error", fmt.Sprintf("database rebuild failed: %v", err))
 			return
 		}
-		r.databaseTestURL = testURL
+		r.databaseTemplateURL = testURL
 	}
 
 	if !r.ports.Swap(r.start, r.stopPort) {

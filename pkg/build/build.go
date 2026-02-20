@@ -13,7 +13,7 @@ import (
 type In struct {
 	AppEnv          map[string]string
 	CheetahURL      string
-	DatabaseTestURL string
+	DatabaseTemplateURL string
 	DatabaseURL     string
 	Port            int
 	Space           string
@@ -63,7 +63,7 @@ func Run(in In) (Out, error) {
 	}
 	cmd.Env = append(cmd.Env,
 		fmt.Sprintf("CHEETAH_URL=%s", in.CheetahURL),
-		fmt.Sprintf("DATABASE_TEST_URL=%s", in.DatabaseTestURL),
+		fmt.Sprintf("DATABASE_TEMPLATE_URL=%s", in.DatabaseTemplateURL),
 		fmt.Sprintf("DATABASE_URL=%s", in.DatabaseURL),
 		fmt.Sprintf("PORT=%d", in.Port),
 		fmt.Sprintf("SPACE=%s", in.Space),
