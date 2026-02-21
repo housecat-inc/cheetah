@@ -221,6 +221,7 @@ func findPID() int {
 func update() {
 	fmt.Println("updating cheetah...")
 	cmd := exec.Command("go", "install", "github.com/housecat-inc/cheetah/cmd/cheetah@latest")
+	cmd.Env = append(os.Environ(), "GOPROXY=direct")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
