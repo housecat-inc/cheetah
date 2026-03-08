@@ -5,6 +5,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/cockroachdb/errors"
+
 	"github.com/housecat-inc/cheetah/pkg/config"
 	"github.com/housecat-inc/cheetah/pkg/pg"
 )
@@ -19,6 +21,12 @@ func TestDB(t testing.TB) string {
 	tmplOnce.Do(func() {
 		port := config.EnvOr("PG_PORT", 54320)
 		dbURL := fmt.Sprintf("postgres://postgres:postgres@localhost:%d/postgres?sslmode=disable", port)
+
+		if _, err := pg.Run(); err != nil {
+			tmplErr = errors.Wrap(err, "start postgres")
+			return
+		}
+
 		tmplURL, tmplErr = pg.EnsureTemplate(dbURL)
 	})
 	if tmplErr != nil {

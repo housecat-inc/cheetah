@@ -41,7 +41,7 @@ func TestDashboardAndProxy(t *testing.T) {
 
 	a := assert.New(t)
 	r := require.New(t)
-	screenshots := t.ArtifactDir()
+	screenshots := t.TempDir()
 
 	bin := filepath.Join(t.TempDir(), "cheetah")
 	out, err := exec.Command("go", "build", "-o", bin, "../../cmd/cheetah").CombinedOutput()
