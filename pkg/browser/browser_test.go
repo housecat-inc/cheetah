@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/go-rod/rod"
+	"github.com/go-rod/rod/lib/launcher"
 	"github.com/go-rod/rod/lib/proto"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -70,7 +71,9 @@ func TestDashboardAndProxy(t *testing.T) {
 	serveMockApp(t, resp.Ports.Blue, "v1")
 	putHealth(t, dashURL, "myapp", "healthy", resp.Ports.Blue)
 
-	browser := rod.New()
+	controlURL := launcher.New().NoSandbox(true).MustLaunch()
+
+	browser := rod.New().ControlURL(controlURL)
 	r.NoError(browser.Connect())
 	t.Cleanup(func() { browser.Close() })
 
