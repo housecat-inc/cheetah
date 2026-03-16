@@ -55,6 +55,7 @@ func Run() (string, error) {
 
 	db := embeddedpostgres.NewDatabase(
 		embeddedpostgres.DefaultConfig().
+			Version(embeddedpostgres.V17).
 			Port(uint32(port)).
 			DataPath(filepath.Join(dir, fmt.Sprintf("pg-data-%d", port))).
 			RuntimePath(filepath.Join(dir, fmt.Sprintf("pg-runtime-%d", port))).
